@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import json
 import hashlib
 import logging
 import traceback
@@ -8,10 +9,13 @@ import sys
 import pefile
 from binascii import hexlify, unhexlify
 from argparse import ArgumentParser
-from rc4 import CustomRC4
 from pprint import pprint
+from pathlib import Path
 
-sys.path.append(os.path.dirname(os.path.realpath(__file__)))
+repo_root = Path(os.path.realpath(__file__)).parent.parent.absolute()
+lib = os.path.join(repo_root, 'lib')
+sys.path.append(lib)
+from rc4 import CustomRC4
 from utils import *
 
 def parse_args():
@@ -19,6 +23,10 @@ def parse_args():
     arg_parser = ArgumentParser(description=usage)
     arg_parser.add_argument('-v', '--verbose', action='count', default=0, 
         help='Increase verbosity. Can specify multiple times for more verbose output')
+    arg_parser.add_argument("-o", "--out", action="store", default=None,
+      help="Path to dump json configuration to")
+    arg_parser.add_argument("-s", "--strings", action="store_true", default=None,
+      help="Write decrypted strings to stdout")
     arg_parser.add_argument('files', nargs='+')
     return arg_parser.parse_args()
 
@@ -124,7 +132,7 @@ class ConfigExtractor:
                     self.parse_strings(ciphertext, key, op_and=True)
                     return True
                     
-                except KeyError as ke:
+                except (KeyError, IndexError) as e:
                     key = None
 
                 function_relative = int.from_bytes(match.group('decrypt_function'), byteorder='little', signed=True)
@@ -268,7 +276,14 @@ if __name__ == '__main__':
         extractor.logger.info(f'Processing {path}')
         try:
             extractor.extract(path)
-            pprint(extractor.config)
+            if options.out:
+                extractor.logger.critical(f'Writing config to {options.out}')
+                with open(options.out, 'w') as fp:
+                    json.dump(extractor.config, fp)
+            if options.strings:
+                pprint(extractor.config)
+            else:
+                pprint({k:v for (k,v) in extractor.config.items() if k != 'decrypted_strings'})
         except Exception as e:
             print(traceback.format_exc())
             
