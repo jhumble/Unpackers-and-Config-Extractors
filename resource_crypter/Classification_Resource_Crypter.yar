@@ -9,9 +9,6 @@ rule Classification_Resource_Crypter {
         date = "02/05/2021"
         description = "Observed being used to pack qakbot (a5856...), hancitor (559e5...), vidar (00473...), SquirrelWaffle (1c4d9...), TA505's Clop (3dff3...), Cobalt Strike Beacon (4c20de...) and likely others"
         hashes = "a58567fe17db5d4ee201dfeaa2466e06, 559e5048af99fae5c81b86555bdf99bb, 0047329ce9da9c0a23d033b97d91cd22, 1c4d98b8f4088fcd0acfad86d3dd66a2, 3dff3fb8daaa1669952b773fa4da5934, 4c20dee427c4e5f9ac9fdfaaeb480773"
-        references = "https://hatching.io/blog/reversing-qakbot/, https://10.212.194.124/ace/events/analysis?direct=331, https://10.212.194.124/ace/events/analysis?direct=329"
-        scope = "detection"
-        platform = "icet"
     /*
         Leverage the weak "encryption" of the PE file embedded in resource
 
