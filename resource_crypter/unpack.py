@@ -8,9 +8,12 @@ import sys
 import pefile
 from binascii import hexlify, unhexlify
 from argparse import ArgumentParser
-from rc4 import CustomRC4
+from pathlib import Path
 
-sys.path.append(os.path.dirname(os.path.realpath(__file__)))
+repo_root = Path(os.path.realpath(__file__)).parent.parent.absolute()
+lib = os.path.join(repo_root, 'lib')
+sys.path.append(lib)
+from rc4 import CustomRC4
 from utils import *
 
 def parse_args():
@@ -20,6 +23,8 @@ def parse_args():
       help="Dump path for unpacked payloads")
     arg_parser.add_argument('-v', '--verbose', action='count', default=0, 
         help='Increase verbosity. Can specify multiple times for more verbose output')
+    arg_parser.add_argument('-y', '--yara', action='store_true', default=False, 
+        help='Only unpack files matching the yara rule Classification_Resource_Crypter.yar')
     arg_parser.add_argument('files', nargs='+')
     return arg_parser.parse_args()
 
@@ -37,7 +42,7 @@ def configure_logger(log_level):
 class Decryptor:
 
     def __init__(self, dump=None):
-        self.logger = logging.getLogger('Qakbot/Hancitor Packer Decryptor')
+        self.logger = logging.getLogger('Resource Crypter Unpacker')
         self.unpacked_pe = None
         self.unpacked = None
         self.config = []
@@ -219,8 +224,16 @@ if __name__ == '__main__':
     options = parse_args()
     configure_logger(options.verbose)
     decryptor = Decryptor(options.dump_dir)
+    if options.yara:
+        import yara
+        rule_path = os.path.join(repo_root, 'resource_crypter', 'Classification_Resource_Crypter.yar')
+        rule = yara.compile(rule_path)
     for arg in options.files:
         for path in recursive_all_files(arg):
+            if options.yara:
+                if not rule.match(path):
+                    decryptor.logger.info(f'Skipping {path} - did not match {rule_path}')
+                    continue
             decryptor.logger.critical(f'Processing {path}')
             try:
                 decryptor.unpack(path)
