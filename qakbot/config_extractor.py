@@ -230,9 +230,10 @@ class ConfigExtractor:
 
     def parse_resource(self, data):
         # Method 1: decrypt with first 20 bytes of resource
-        mapping = { '10': 'campaign id',
+        mapping = { '10': 'Botnet id',
                     '11': 'number of hardcoded C2s',
                     '2' : 'Date of Qbot install in HH:MM:ss-dd/mm/yyyy',
+                    '3' : 'campaign id',
                     '50': 'unknown field 50',
                     '5' : 'victim network shares',
                     '38': 'last victim call to C2 (unix time)',
