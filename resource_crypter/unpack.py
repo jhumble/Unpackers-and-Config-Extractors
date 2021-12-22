@@ -184,7 +184,7 @@ class Decryptor:
                     We can determine the ratio of copy/skip by comparing the resource's actual size to the size
                     specified in the first 4 bytes
                 """
-                for frac in nearest_fractions(len(resdata), size, max_fractions=32): # Only try the 32 best approximations
+                for frac in nearest_fractions(len(resdata), size, max_fractions=100): # Only try the 100 best approximations
                     block_size = frac.denominator
                     skip = frac.numerator - block_size
                     for i in range(1,255):
