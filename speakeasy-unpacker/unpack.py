@@ -37,9 +37,9 @@ class MonitoredSection:
 
 class Unpacker(speakeasy.Speakeasy):
 
-    def __init__(self, path, trace=False, trace_regs=False, dump_dir=None, 
-                 monitor_execs=False, monitor_writes=False, output='debug', 
-                 libcache=True, shellcode=False, function=None, carve=False, arch='x86'):
+    def __init__(self, path, trace=False, trace_regs=False, dump_dir=None, monitor_execs=False, 
+                 monitor_writes=False, output='debug', libcache=True, shellcode=False, 
+                 function=None, carve=False, arch='x86', timeout=30):
 
         super(Unpacker, self).__init__(debug=False)
         self.path = path
@@ -53,6 +53,7 @@ class Unpacker(speakeasy.Speakeasy):
         self.hooks = {}
         self.function = function
         self.carve = carve
+        self.timeout = timeout
         if arch == 'x86':
             self.arch = e_arch.ARCH_X86
         elif arch in ('x64', 'amd64'):
@@ -166,7 +167,6 @@ class Unpacker(speakeasy.Speakeasy):
                 self.logger.info('Dumping 0x%X bytes to %s' % (section.size, path))
                 fp.write(data)
             if self.carve:
-                print('Carving...')
                 carved_pes = carve(data)
                 if carved_pes:
                     self.logger.info(f'Found {len(carved_pes)} PE files in {section}')
@@ -233,6 +233,7 @@ class Unpacker(speakeasy.Speakeasy):
         else:
             sc_addr = self.load_shellcode(self.path, self.arch)
             self.logger.info(f'Loaded shellcode at 0x{sc_addr:08X}')
+        self.emu.timeout = self.timeout
 
         #Hook the memory mapper so we can set up watches
         self.original_mem_map = self.emu.mem_map
@@ -280,8 +281,6 @@ class Unpacker(speakeasy.Speakeasy):
         except Exception as e:
             self.logger.error('Program Crashed: {}'.format(e))
             self.logger.error(traceback.format_exc())
-        finally:
-            self.dump()
 
 def parse_args():
     usage = "unpack.py [OPTION]... [FILES]..."
@@ -311,12 +310,9 @@ if __name__ == "__main__":
         for path in recursive_all_files(arg):
             unpacker = Unpacker(path=path, trace=options.trace, trace_regs=options.reg, dump_dir=options.dump, 
                                 monitor_execs=options.dump_exec, monitor_writes=options.dump_write, 
-                                function=options.export, carve=options.carve, arch=options.arch)
+                                function=options.export, carve=options.carve, arch=options.arch, timeout=options.timeout)
             try:
-                #unpacker.run() -- remove func_timeout wrapper to profile
-                func_timeout(options.timeout, unpacker.run)
-            except FunctionTimedOut:
-                unpacker.logger.info('Emulation timed out after {}s'.format(options.timeout))
+                unpacker.run()
             except Exception as e:
                 unpacker.logger.error('Exception emulating {}:\n{}'.format(path, traceback.format_exc()))
             finally:
