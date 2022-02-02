@@ -216,9 +216,6 @@ class Unpacker(speakeasy.Speakeasy):
     # Emulate the binary from begin until @end, with timeout in @timeout and
     # number of emulated instructions in @count
     def run(self, begin=None, end=None, timeout=0, count=0):
-        # replace the original entry point, exit point, timeout and count
-        self.timeout = timeout
-        self.count = count
 
         module = self.load_module(self.path)
 
@@ -298,6 +295,7 @@ if __name__ == "__main__":
                                 monitor_execs=options.dump_exec, monitor_writes=options.dump_write, 
                                 function=options.export, carve=options.carve)
             try:
+                #unpacker.run() -- remove func_timeout wrapper to profile
                 func_timeout(options.timeout, unpacker.run)
             except FunctionTimedOut:
                 unpacker.logger.info('Emulation timed out after {}s'.format(options.timeout))
