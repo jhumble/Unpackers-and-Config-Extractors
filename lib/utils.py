@@ -3,6 +3,13 @@ import fractions
 import re
 import struct
 import pefile
+import logging
+
+def configure_logger(log_level):
+    log_levels = {0: logging.ERROR, 1: logging.WARNING, 2: logging.INFO, 3: logging.DEBUG}
+    log_level = min(max(log_level, 0), 3) #clamp to 0-3 inclusive
+    logging.basicConfig(level=log_levels[log_level], 
+            format='%(asctime)s - %(name)s - %(levelname)-8s %(message)s')
 
 def rol(dword, i):
     return ((dword << i) & 0xffffffff) | (dword >> (32-i) ) 
@@ -88,44 +95,30 @@ def recursive_all_files(directory, ext_filter=None):
     return ret
 
 def carve(buf):
-    length = 0
-    SECTION_SIZE = 0x28
-    #print 'Searching %s byte buf for PE files' % (len(buf))
     found = []
-
     for i in [match.start() for match in re.finditer(b'MZ', buf)]:
-        if i > len(buf) - 0x400: #1KB minimum
+        if i == 0: # Ignore matches at offset 0 (regular PE files)
             continue
-        #print 'Found MZ @ %x' % (i)
-        pe_offset = struct.unpack('<L', buf[i+0x3c:i+0x3c+4])[0]
-        #print 'PE OFFSET = %x' % (pe_offset)
-        # PE header is typically within 1kb of the MZ header. We'll allow for 16MB which should
-        # allow plenty of room for oddly formatted PE files
-        HEADER = i + pe_offset
-        #print 'POSSIBLE PE HEADER = %x' % (HEADER)
-        
-        if (HEADER +0x100) <= len(buf) and pe_offset > 0 and pe_offset < 0x1000000:
-            if buf[HEADER] == ord('P') and buf[HEADER+1] == ord('E'):
-                #print 'PE HEADER = 0x%x' % (HEADER)
-                num_sections = struct.unpack('<H', buf[HEADER + 0x06:HEADER+0x06+2])[0]
-                if num_sections < 1 or num_sections > 1000:
-                    #print 'Invalid number of sections'
-                    continue
-                #print 'NUMBER OF SECTIONS: 0x%x' % (num_sections)
-                SECTIONS = HEADER + 0xF8
-                #print 'SECTIONS structure at 0x%x' % (SECTIONS)
-                last_section = SECTIONS+(num_sections-1)*SECTION_SIZE
-                #print 'LAST SECTION at 0x%x' % (last_section)
-                raw_loc = struct.unpack('<L', buf[last_section + 0x14:last_section+ 0x14 + 4])[0]
-                #print 'RAW LOCATION = 0x%x' % (raw_loc)
-                raw_size = struct.unpack('<L', buf[last_section + 0x10:last_section+ 0x10 + 4])[0]
-                #print 'RAW SIZE = 0x%x' % (raw_size)
-                end_of_last_section = i + raw_loc + raw_size
-                if end_of_last_section <= len(buf):
-                    #found.append({'start': i, 'end': end_of_last_section, 'data': buf[i:end_of_last_section]})
-                    found.append({'offset': i, 'data': buf[i:end_of_last_section]})
-
+        try:
+            pe = pefile.PE(data=buf[i:])
+        except:
+            continue
+        #print(f'Found PE file at offset 0x{i:X}')
+        found.append({'offset': i, 'data': pe.trim(), 'ext': get_ext(pe) })
     return found
+
+
+def get_ext(pe):
+    # https://github.com/MalwareLu/tools/blob/master/pe-carv.py
+    'returns ext of the file type using pefile'
+    if pe.is_dll() == True:
+        return 'dll'
+    if pe.is_driver() == True:
+        return 'sys'
+    if pe.is_exe() == True:
+        return 'exe'
+    else:
+        return 'bin'
 
 def iter_resources(pe):
     for rsrc in pe.DIRECTORY_ENTRY_RESOURCE.entries:

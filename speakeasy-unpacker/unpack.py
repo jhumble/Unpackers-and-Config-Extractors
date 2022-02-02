@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
 
-import sys
-sys.path.insert(0, "..")
-from utils import *
-
-del sys.path[0]
-
-sys.tracebacklimit = 0
 
 import logging
 import argparse
@@ -15,11 +8,18 @@ import speakeasy
 import pefile
 import traceback
 import tempfile
+import sys
+from pathlib import Path
 from func_timeout import func_timeout, FunctionTimedOut
-from utils import carve, configure_logger, stdout_redirected
-
 from speakeasy.winenv.api import api
 import speakeasy.winenv.defs.windows.windows as windefs
+import speakeasy.common as common
+
+repo_root = Path(os.path.realpath(__file__)).parent.parent.absolute()
+lib = os.path.join(repo_root, 'lib')
+sys.path.append(lib)
+
+from utils import *
 
 class MonitoredSection:
     def __init__(self, section_type, start, size):
@@ -41,8 +41,8 @@ class Unpacker(speakeasy.Speakeasy):
         self.path = path
         self.trace = trace
         self.trace_regs = trace_regs
-        self.monitor_execution_sections = []
-        self.monitor_write_sections = []
+        self.exec_sections = {}
+        self.write_sections = {}
         self.monitor_writes = monitor_writes
         self.monitor_execs = monitor_execs
         self.tracing = False
@@ -66,6 +66,7 @@ class Unpacker(speakeasy.Speakeasy):
         except Exception as e:
             print(e)
 
+
         if self.monitor_execs:
             if 'VirtualProtect' not in self.hooks:
                 self.hooks['VirtualProtect'] = True
@@ -80,13 +81,49 @@ class Unpacker(speakeasy.Speakeasy):
             if 'RtlHeapAlloc' not in self.hooks:
                 self.hooks['HeapAlloc'] = True
                 self.add_api_hook(self.hook_RtlAllocateHeap, 'ntdll', 'RtlAllocateHeap')
-            #if self.shellcoder:
-                #TODO should use self.entry_point but it's not yet loaded at this point
-                #self.watch_writes(0x00040000, len(self.shellcoder))
             else:
                 self.watch_writes(self.loader.pe_image_address, self.loader.pe_image_address_size)
         if self.trace:
             self.start_trace()
+
+    def hooked_mem_map(self, size, base=None, perms=common.PERM_MEM_RWX,
+                tag=None, flags=0, shared=False, process=None):
+        #Call the original to map the memory
+        addr = self.original_mem_map(size, base, perms, tag, flags, shared, process)
+
+        #bitwise AND fails /w None
+        if not perms:
+            perms = 0
+        
+        if self.monitor_execs and (perms & common.PERM_MEM_EXEC):
+            self.watch_execs(addr, size)
+        elif self.monitor_writes and (perms & common.PERM_MEM_WRITE):
+            self.watch_writes(addr, size)
+
+        if base:
+            basestr = f'0x{base:08X}'
+        else:
+            basestr = 'NULL'
+
+        #self.logger.debug(f'Memory Allocation - size: 0x{size:08X}, base: {basestr}, perms: {perms} => {addr:08X}')
+        #print('\n'.join(traceback.format_stack()))
+        return addr
+
+    def hooked_mem_unmap(self, base, size):
+        rtn = self.original_mem_unmap(base, size)
+
+        free = []
+        for addr, section in self.write_sections.items():
+            if base >= section.start and base < section.end and section.written >= 10: #TODO Make config item
+                self.logger.info('Program attempting to free monitored and written-to section. Dumping...')
+                self.dump_section(section)
+                free.append(addr)
+
+        for addr in free:
+            del self.write_sections[addr]
+
+        return rtn
+        
 
     def hook_RtlAllocateHeap(self, emu, api_name, func, params):
         '''
@@ -179,10 +216,28 @@ class Unpacker(speakeasy.Speakeasy):
             );
         '''
         lpAddress, dwSize, dwFreeType = params
-
-        for i in range(0, len(self.monitor_write_sections)):
-            section = self.monitor_write_sections[i]
+        print(len(self.write_sections))
+        for addr, section in self.write_sections.items():
             if lpAddress >= section.start and lpAddress < section.end and section.written >= 10: #TODO Make config item
+                self.logger.info('Program attempting to free monitored and written-to section. Dumping...')
+                self.dump_section(section)
+                del section
+        print(len(self.write_sections))
+        return func(params)
+
+    def hook_RtlFreeHeap(self, emu, api_name, func, params):
+        '''
+            NTSYSAPI LOGICAL RtlFreeHeap(
+              [in]           PVOID                 HeapHandle,
+              [in, optional] ULONG                 Flags,
+                             _Frees_ptr_opt_ PVOID BaseAddress
+            );
+        '''
+        HeapHandle, Flags, BaseAddress = params
+        print('RtlFreeHeap hook')
+
+        for addr, section in self.write_sections.items():
+            if BaseAddress >= section.start and BaseAddress < section.end and section.written >= 10: #TODO Make config item
                 self.logger.info('Program attempting to free monitored and written-to section. Dumping...')
                 self.dump_section(section)
                 del self.monitor_write_sections[i]
@@ -215,7 +270,7 @@ class Unpacker(speakeasy.Speakeasy):
 
     def dump(self):
         if self.dump_dir: 
-            all_sections = self.monitor_execution_sections + [section for section in self.monitor_write_sections if section.written >= 10] # TODO make config item
+            all_sections = list(self.exec_sections.values()) + [section for section in self.write_sections.values() if section.written >= 10] # TODO make config item
             if len(all_sections) > 0:
                 self.logger.info('Dumping monitored sections...')
                 for section in all_sections:
@@ -234,6 +289,7 @@ class Unpacker(speakeasy.Speakeasy):
                 self.logger.info('Dumping 0x%X bytes to %s' % (section.size, path))
                 fp.write(data)
             if self.carve:
+                print('Carving...')
                 carved_pes = carve(data)
                 if carved_pes:
                     self.logger.info(f'Found {len(carved_pes)} PE files in {section}')
@@ -262,7 +318,7 @@ class Unpacker(speakeasy.Speakeasy):
 
     def monitor_section_write(self, access, address, size, value, ctx):
         #print(f'monitor_section_write({str(type(self))}, {access}, {address}, {size:08X}, {value}')
-        for section in self.monitor_write_sections:
+        for addr, section in self.write_sections.items():
             try:
                 if address >= section.start and address <= section.end:
                     if section.written == 0:
@@ -276,9 +332,10 @@ class Unpacker(speakeasy.Speakeasy):
     def watch_writes(self, addr, size):
         self.logger.debug('Watching 0x{:08X}-0x{:08X} for Write/Free'.format(addr, addr+size))
         section = MonitoredSection('write', addr, size)
-        self.monitor_write_sections.append(section) 
+        self.write_sections[addr] = section
         self.add_mem_write_hook(Unpacker.monitor_section_write, begin=section.start, end=section.end)
         self.add_api_hook(self.hook_VirtualFree, 'kernel32', 'VirtualFree')
+        self.add_api_hook(self.hook_RtlFreeHeap, 'ntdll', 'RtlFreeHeap')
 
     def watch_execs(self, addr, size):
         self.logger.debug('Watching 0x{:08X}-0x{:08X} for Exec'.format(addr, addr+size))
@@ -297,6 +354,14 @@ class Unpacker(speakeasy.Speakeasy):
         self.count = count
 
         module = self.load_module(self.path)
+
+        #Hook the memory mapper so we can set up watches
+        self.original_mem_map = self.emu.mem_map
+        self.emu.mem_map = self.hooked_mem_map
+        #TODO hook mem unmapper for dumping
+        self.original_mem_unmap = self.emu.mem_unmap
+        self.emu.mem_unmap = self.hooked_mem_unmap
+
         try:
             if self.pe and self.pe.is_dll():
                 #DllMain should be called first
