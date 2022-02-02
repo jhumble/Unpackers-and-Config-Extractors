@@ -165,7 +165,7 @@ class Unpacker(speakeasy.Speakeasy):
         except Exception as e:
             self.logger.error(traceback.format_exc())
 
-    def monitor_section_execute(self, address, size):
+    def monitor_section_execute(self, emu, address, size, ctx):
         # Watch address EIP in watched memory regions
         free = []
         for addr, section in self.exec_sections.items():
@@ -207,7 +207,7 @@ class Unpacker(speakeasy.Speakeasy):
         self.exec_sections[addr] = section
         if 'monitor_section_execute' not in self.hooks:
             self.hooks['monitor_section_execute'] = True
-            self.hook_code(Unpacker.monitor_section_execute)
+            self.add_code_hook(Unpacker.monitor_section_execute)
 
         
     # Emulate the binary from begin until @end, with timeout in @timeout and
