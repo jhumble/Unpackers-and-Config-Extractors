@@ -79,10 +79,11 @@ class Unpacker(speakeasy.Speakeasy):
         if not perms:
             perms = 0
         
-        if self.monitor_execs and (perms & common.PERM_MEM_EXEC):
-            self.watch_execs(addr, size)
-        elif self.monitor_writes and (perms & common.PERM_MEM_WRITE):
+
+        if self.monitor_writes and (perms & common.PERM_MEM_WRITE):
             self.watch_writes(addr, size)
+        elif self.monitor_execs and (perms & common.PERM_MEM_EXEC):
+            self.watch_execs(addr, size)
 
         if base:
             basestr = f'0x{base:08X}'
@@ -134,7 +135,8 @@ class Unpacker(speakeasy.Speakeasy):
 
     def dump(self):
         if self.dump_dir: 
-            all_sections = list(self.exec_sections.values()) + [section for section in self.write_sections.values() if section.written >= 10] # TODO make config item
+            all_sections = list(self.exec_sections.values()) + list(self.write_sections.values())
+            all_sections = [section for section in all_sections if section.written >= 10] # TODO make config item
             if len(all_sections) > 0:
                 self.logger.info('Dumping monitored sections...')
                 for section in all_sections:
@@ -181,8 +183,9 @@ class Unpacker(speakeasy.Speakeasy):
                 exit()
         for addr in free:
             del self.exec_sections[addr]
+        return True
 
-    def monitor_section_write(self, access, address, size, value, ctx):
+    def monitor_section_write(self, emu, access, address, size, value, ctx):
         #print(f'monitor_section_write({str(type(self))}, {access}, {address}, {size:08X}, {value}')
         for addr, section in self.write_sections.items():
             try:
@@ -199,7 +202,7 @@ class Unpacker(speakeasy.Speakeasy):
         self.logger.debug('Watching 0x{:08X}-0x{:08X} for Write/Free'.format(addr, addr+size))
         section = MonitoredSection('write', addr, size)
         self.write_sections[addr] = section
-        self.add_mem_write_hook(Unpacker.monitor_section_write, begin=section.start, end=section.end)
+        self.add_mem_write_hook(self.monitor_section_write, begin=section.start, end=section.end)
 
     def watch_execs(self, addr, size):
         self.logger.debug('Watching 0x{:08X}-0x{:08X} for Exec'.format(addr, addr+size))
@@ -207,7 +210,7 @@ class Unpacker(speakeasy.Speakeasy):
         self.exec_sections[addr] = section
         if 'monitor_section_execute' not in self.hooks:
             self.hooks['monitor_section_execute'] = True
-            self.add_code_hook(Unpacker.monitor_section_execute)
+            self.add_code_hook(self.monitor_section_execute)
 
         
     # Emulate the binary from begin until @end, with timeout in @timeout and
