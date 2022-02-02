@@ -167,18 +167,20 @@ class Unpacker(speakeasy.Speakeasy):
 
     def monitor_section_execute(self, address, size):
         # Watch address EIP in watched memory regions
-        for i in range(0, len(self.monitor_execution_sections)):
-            section = self.monitor_execution_sections[i]
+        free = []
+        for addr, section in self.execution_sections.items():
             try:
                 if address >= section.start and address <= section.end:
                     self.logger.debug('Caught execution in monitored memory section 0x%X-0x%X. Current Instruction: %s' % 
                         (section.start, section.end, disasm(self, self.disassembler, address, size, instr_bytes=False)))
                     if self.dump_dir:
                         self.dump_section(section, address)
-                    del self.monitor_execution_sections[i]                
+                    free.append(addr)
             except Exception as e:
                 self.logger.info(traceback.format_exc())
                 exit()
+        for addr in free:
+            del self.execution_sections[addr]
 
     def monitor_section_write(self, access, address, size, value, ctx):
         #print(f'monitor_section_write({str(type(self))}, {access}, {address}, {size:08X}, {value}')
@@ -202,7 +204,7 @@ class Unpacker(speakeasy.Speakeasy):
     def watch_execs(self, addr, size):
         self.logger.debug('Watching 0x{:08X}-0x{:08X} for Exec'.format(addr, addr+size))
         section = MonitoredSection('execution', addr, size)
-        self.monitor_execution_sections.append(section) 
+        self.execution_sections[addr] = section
         if 'monitor_section_execute' not in self.hooks:
             self.hooks['monitor_section_execute'] = True
             self.hook_code(Unpacker.monitor_section_execute)
