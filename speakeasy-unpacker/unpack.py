@@ -14,6 +14,7 @@ from func_timeout import func_timeout, FunctionTimedOut
 from speakeasy.winenv.api import api
 import speakeasy.winenv.defs.windows.windows as windefs
 import speakeasy.common as common
+import speakeasy.winenv.arch as e_arch
 
 repo_root = Path(os.path.realpath(__file__)).parent.parent.absolute()
 lib = os.path.join(repo_root, 'lib')
@@ -36,7 +37,10 @@ class MonitoredSection:
 
 class Unpacker(speakeasy.Speakeasy):
 
-    def __init__(self, path, trace=False, trace_regs=False, dump_dir=None, monitor_execs=False, monitor_writes=False, output='debug', libcache=True, shellcode=False, function=None, carve=False):
+    def __init__(self, path, trace=False, trace_regs=False, dump_dir=None, 
+                 monitor_execs=False, monitor_writes=False, output='debug', 
+                 libcache=True, shellcode=False, function=None, carve=False, arch='x86'):
+
         super(Unpacker, self).__init__(debug=False)
         self.path = path
         self.trace = trace
@@ -49,6 +53,12 @@ class Unpacker(speakeasy.Speakeasy):
         self.hooks = {}
         self.function = function
         self.carve = carve
+        if arch == 'x86':
+            self.arch = e_arch.ARCH_X86
+        elif arch in ('x64', 'amd64'):
+            self.arch = e_arch.ARCH_AMD64
+        else:
+            raise Exception('Unsupported architecture: %s' % arch)
 
         if not dump_dir:
             self.dump_dir = tempfile.mkdtemp()
@@ -64,7 +74,8 @@ class Unpacker(speakeasy.Speakeasy):
         try:
             self.pe = pefile.PE(self.path)
         except Exception as e:
-            print(e)
+            self.logger.info(f'{self.path} is not a PE file, assuming shellcode')
+            self.pe = None
 
 
         if self.trace:
@@ -217,7 +228,11 @@ class Unpacker(speakeasy.Speakeasy):
     # number of emulated instructions in @count
     def run(self, begin=None, end=None, timeout=0, count=0):
 
-        module = self.load_module(self.path)
+        if self.pe:
+            module = self.load_module(self.path)
+        else:
+            sc_addr = self.load_shellcode(self.path, self.arch)
+            self.logger.info(f'Loaded shellcode at 0x{sc_addr:08X}')
 
         #Hook the memory mapper so we can set up watches
         self.original_mem_map = self.emu.mem_map
@@ -257,9 +272,11 @@ class Unpacker(speakeasy.Speakeasy):
             elif self.pe:
                 self.run_module(module)
             else: # assume shellcode
-                #TODO - watch section sc is mapped into (assumed rwx)
-                #self.watch_writes(0x00040000, len(self.shellcoder))
-                self.run_module(module)
+                # get size of shellcode rounded up to nearest 0x1000 bytes
+                size = ((os.stat(self.path).st_size - 1) // 0x1000) + 0x1000
+                self.watch_writes(sc_addr, size)
+                self.run_shellcode(sc_addr, offset=0)
+
         except Exception as e:
             self.logger.error('Program Crashed: {}'.format(e))
             self.logger.error(traceback.format_exc())
@@ -279,6 +296,7 @@ def parse_args():
     parser.add_argument("-S", "--strings", help="Report new strings from dumped files", default=False, action="store_true")
     parser.add_argument("-y", "--yara", help="Report new yara results from dumped files", default=False, action="store_true")
     parser.add_argument("-c", "--carve", help="Attempt to carve PE files from dumped sections", default=False, action="store_true")
+    parser.add_argument("-a", "--arch", help="If input is shellcode, define architechture x86 or x64", default='x86', action="store")
     parser.add_argument('-v', '--verbose', action='count', default=0, 
         help='Increase verbosity. Can specify multiple times for more verbose output')
     parser.add_argument('files', nargs='*')
@@ -293,7 +311,7 @@ if __name__ == "__main__":
         for path in recursive_all_files(arg):
             unpacker = Unpacker(path=path, trace=options.trace, trace_regs=options.reg, dump_dir=options.dump, 
                                 monitor_execs=options.dump_exec, monitor_writes=options.dump_write, 
-                                function=options.export, carve=options.carve)
+                                function=options.export, carve=options.carve, arch=options.arch)
             try:
                 #unpacker.run() -- remove func_timeout wrapper to profile
                 func_timeout(options.timeout, unpacker.run)
