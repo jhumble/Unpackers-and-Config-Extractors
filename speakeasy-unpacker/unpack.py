@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
-
+import json
+import types
 import logging
 import argparse
 import os
@@ -21,6 +22,113 @@ lib = os.path.join(repo_root, 'lib')
 sys.path.append(lib)
 
 from utils import *
+
+def handle_import_func(self, dll, name):
+    """
+    Patched version of WinEmu.handle_import_func that tries to handle 
+    Unsupported windows APIs by just returning NULL and handling stack 
+    clean up by parsing a json file with FunctionName: argc mapping
+
+    Forward imported functions to the corresponding handler (if any).
+    """
+    if not hasattr(self, 'win_functions'): # load the first time
+        sys.path.append(os.path.dirname(os.path.realpath(__file__)))
+        with open(os.path.join(os.path.dirname(os.path.realpath(__file__)), 'winfuncs.json')) as fp:
+            self.win_functions = json.load(fp)
+
+    imp_api = '%s.%s' % (dll, name)
+    oret = self.get_ret_address()
+    mod, func_attrs = self.api.get_export_func_handler(dll, name)
+    if not func_attrs:
+        mod, func_attrs = self.normalize_import_miss(dll, name)
+
+    if func_attrs:
+        handler_name, func, argc, conv, ordinal = func_attrs
+
+        if name.startswith('ordinal_'):
+            name = handler_name
+
+        argv = self.get_func_argv(conv, argc)
+        imp_api = '%s.%s' % (dll, name)
+        default_ctx = {'func_name': imp_api}
+
+        self.hammer.handle_import_func(imp_api, conv, argc)
+        hooks = self.get_api_hooks(dll, name)
+        if hooks:
+            from types import MethodType
+            hooked_func = MethodType(func, mod)
+            orig = lambda args: hooked_func(self, args, default_ctx) # noqa
+            for hook in hooks:
+                # each hook is called with the arguments, and only the last return value is
+                # considered
+                rv = hook.cb(self, imp_api, orig, argv)
+        else:
+            try:
+                rv = self.api.call_api_func(mod, func, argv, ctx=default_ctx)
+            except Exception as e:
+                self.log_exception('0x%x: Error while calling API handler for %s:' %
+                                   (oret, imp_api))
+                error = self.get_error_info(str(e), self.get_pc(),
+                                            traceback=traceback.format_exc())
+                self.curr_run.error = error
+                self.on_run_complete()
+                return
+
+        ret = self.get_ret_address()
+        mm = self.get_address_map(ret)
+
+        # Is this function being called from a dynamcially allocated memory segment?
+        if mm and 'virtualalloc' in mm.get_tag().lower():
+            self._dynamic_code_cb(self, ret, 0, {})
+
+        # Log the API args and return value
+        self.log_api(oret, imp_api, rv, argv)
+
+        if not self.run_complete and ret == oret:
+            self.do_call_return(argc, ret, rv, conv=conv)
+
+    else:
+        # See if a user defined a hook for this unsupported function
+        hooks = self.get_api_hooks(dll, name)
+        if hooks:
+            # Since the function is unsupported, just call the most accurate defined hook
+            hook = hooks[0]
+            imp_api = '%s.%s' % (dll, name)
+
+            if hook.call_conv is None:
+                hook.call_conv = e_arch.CALL_CONV_STDCALL
+
+            argv = self.get_func_argv(hook.call_conv, hook.argc)
+            self.hammer.handle_import_func(imp_api, hook.call_conv, hook.argc)
+            rv = hook.cb(self, imp_api, None, argv)
+            ret = self.get_ret_address()
+            self.log_api(ret, imp_api, rv, argv)
+            self.do_call_return(hook.argc, ret, rv, conv=hook.call_conv)
+            return
+        else: #elif self.functions_always_exist:
+            imp_api = '%s.%s' % (dll, name)
+            try:
+                argc = self.win_functions[name]
+                self.logger.debug(f'Emulating unimplemented API: {imp_api}')
+                conv = e_arch.CALL_CONV_STDCALL
+                argv = self.get_func_argv(conv, argc)
+                rv = 0
+                ret = self.get_ret_address()
+                self.log_api(ret, imp_api, rv, argv)
+                self.do_call_return(argc, ret, rv, conv=conv)
+                return
+            except KeyError:
+                self.logger.error(f'Unsupported API: {imp_api} without definition in winfuncs.json')
+                #Let execution fall to the original unsupported api code below
+
+    run = self.get_current_run()
+    if run and run.get_api_count() > self.max_api_count:
+        self.log_info("* Maximum number of API calls reached. Stopping current run.")
+        run.error['type'] = 'max_api_count'
+        run.error['count'] = self.max_api_count
+        run.error['pc'] = hex(self.get_pc())
+        run.error['last_api'] = imp_api
+        self.on_run_complete()
 
 class MonitoredSection:
     def __init__(self, section_type, start, size):
@@ -54,6 +162,9 @@ class Unpacker(speakeasy.Speakeasy):
         self.function = function
         self.carve = carve
         self.timeout = timeout
+
+
+
         if arch == 'x86':
             self.arch = e_arch.ARCH_X86
         elif arch in ('x64', 'amd64'):
@@ -107,19 +218,18 @@ class Unpacker(speakeasy.Speakeasy):
         return addr
 
     def hooked_mem_unmap(self, base, size):
-        rtn = self.original_mem_unmap(base, size)
-
         free = []
         for addr, section in self.write_sections.items():
-            if base >= section.start and base < section.end and section.written >= 10: #TODO Make config item
-                self.logger.info('Program attempting to free monitored and written-to section. Dumping...')
+            if base >= section.start and base < section.end and section.written >= 100: #TODO Make config item
+                self.logger.info(f'Program attempting to free monitored and written-to section {section}. Dumping...')
                 self.dump_section(section)
                 free.append(addr)
 
         for addr in free:
             del self.write_sections[addr]
+        print(self.write_sections[addr])
 
-        return rtn
+        return self.original_mem_unmap(base, size)
         
     """
 
@@ -234,6 +344,7 @@ class Unpacker(speakeasy.Speakeasy):
             sc_addr = self.load_shellcode(self.path, self.arch)
             self.logger.info(f'Loaded shellcode at 0x{sc_addr:08X}')
         self.emu.timeout = self.timeout
+        self.emu.max_api_count = 10**6
 
         #Hook the memory mapper so we can set up watches
         self.original_mem_map = self.emu.mem_map
@@ -241,6 +352,9 @@ class Unpacker(speakeasy.Speakeasy):
         #TODO hook mem unmapper for dumping
         self.original_mem_unmap = self.emu.mem_unmap
         self.emu.mem_unmap = self.hooked_mem_unmap
+
+        #self.emu.handle_import_func = handle_import_func
+        self.emu.handle_import_func = types.MethodType(handle_import_func, self.emu)
 
         try:
             if self.pe and self.pe.is_dll():
@@ -281,6 +395,8 @@ class Unpacker(speakeasy.Speakeasy):
         except Exception as e:
             self.logger.error('Program Crashed: {}'.format(e))
             self.logger.error(traceback.format_exc())
+
+
 
 def parse_args():
     usage = "unpack.py [OPTION]... [FILES]..."
