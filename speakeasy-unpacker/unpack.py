@@ -37,6 +37,11 @@ def handle_import_func(self, dll, name):
             self.win_functions = json.load(fp)
 
     imp_api = '%s.%s' % (dll, name)
+    try:
+        self.api_counts[imp_api] += 1
+    except:
+        self.api_counts[imp_api] = 1
+
     oret = self.get_ret_address()
     mod, func_attrs = self.api.get_export_func_handler(dll, name)
     if not func_attrs:
@@ -82,7 +87,11 @@ def handle_import_func(self, dll, name):
             self._dynamic_code_cb(self, ret, 0, {})
 
         # Log the API args and return value
-        self.log_api(oret, imp_api, rv, argv)
+        if self.api_counts[imp_api] < self.api_log_max:
+            self.log_api(oret, imp_api, rv, argv)
+            self.api_counts[imp_api] += 1
+        elif self.api_counts[imp_api] == self.api_log_max:
+            self.logger.warning(f'Hit max log count of {self.api_log_max} for {imp_api}, supressing further call logs')
 
         if not self.run_complete and ret == oret:
             self.do_call_return(argc, ret, rv, conv=conv)
@@ -102,7 +111,12 @@ def handle_import_func(self, dll, name):
             self.hammer.handle_import_func(imp_api, hook.call_conv, hook.argc)
             rv = hook.cb(self, imp_api, None, argv)
             ret = self.get_ret_address()
-            self.log_api(ret, imp_api, rv, argv)
+            # Log the API args and return value
+            if self.api_counts[imp_api] < self.api_log_max:
+                self.log_api(oret, imp_api, rv, argv)
+                self.api_counts[imp_api] += 1
+            elif self.api_counts[imp_api] == self.api_log_max:
+                self.logger.warning(f'Hit max log count of {self.api_log_max} for {imp_api}, supressing further call logs')
             self.do_call_return(hook.argc, ret, rv, conv=hook.call_conv)
             return
         else: #elif self.functions_always_exist:
@@ -162,8 +176,6 @@ class Unpacker(speakeasy.Speakeasy):
         self.function = function
         self.carve = carve
         self.timeout = timeout
-
-
 
         if arch == 'x86':
             self.arch = e_arch.ARCH_X86
@@ -227,7 +239,6 @@ class Unpacker(speakeasy.Speakeasy):
 
         for addr in free:
             del self.write_sections[addr]
-        print(self.write_sections[addr])
 
         return self.original_mem_unmap(base, size)
         
@@ -345,6 +356,8 @@ class Unpacker(speakeasy.Speakeasy):
             self.logger.info(f'Loaded shellcode at 0x{sc_addr:08X}')
         self.emu.timeout = self.timeout
         self.emu.max_api_count = 10**6
+        self.emu.api_counts = {}
+        self.emu.api_log_max = 100
 
         #Hook the memory mapper so we can set up watches
         self.original_mem_map = self.emu.mem_map
