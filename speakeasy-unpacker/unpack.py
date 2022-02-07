@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import yaml
 import json
 import types
 import logging
@@ -28,6 +29,9 @@ def handle_import_func(self, dll, name):
     Patched version of WinEmu.handle_import_func that tries to handle 
     Unsupported windows APIs by just returning NULL and handling stack 
     clean up by parsing a json file with FunctionName: argc mapping
+
+    Also keeps track of how many times each api has been called and stops
+    logging after a set limit
 
     Forward imported functions to the corresponding handler (if any).
     """
@@ -90,8 +94,8 @@ def handle_import_func(self, dll, name):
         if self.api_counts[imp_api] < self.api_log_max:
             self.log_api(oret, imp_api, rv, argv)
             self.api_counts[imp_api] += 1
-        elif self.api_counts[imp_api] == self.api_log_max:
-            self.logger.warning(f'Hit max log count of {self.api_log_max} for {imp_api}, supressing further call logs')
+            if self.api_counts[imp_api] == self.api_log_max:
+                self.logger.warning(f'Hit max log count of {self.api_log_max} for {imp_api}, supressing further call logs')
 
         if not self.run_complete and ret == oret:
             self.do_call_return(argc, ret, rv, conv=conv)
@@ -115,11 +119,11 @@ def handle_import_func(self, dll, name):
             if self.api_counts[imp_api] < self.api_log_max:
                 self.log_api(oret, imp_api, rv, argv)
                 self.api_counts[imp_api] += 1
-            elif self.api_counts[imp_api] == self.api_log_max:
-                self.logger.warning(f'Hit max log count of {self.api_log_max} for {imp_api}, supressing further call logs')
+                if self.api_counts[imp_api] == self.api_log_max:
+                    self.logger.warning(f'Hit max log count of {self.api_log_max} for {imp_api}, supressing further call logs')
             self.do_call_return(hook.argc, ret, rv, conv=hook.call_conv)
             return
-        else: #elif self.functions_always_exist:
+        else: #elif self.exports_always_exist:
             imp_api = '%s.%s' % (dll, name)
             try:
                 argc = self.win_functions[name]
@@ -133,7 +137,6 @@ def handle_import_func(self, dll, name):
                 return
             except KeyError:
                 self.logger.error(f'Unsupported API: {imp_api} without definition in winfuncs.json')
-                #Let execution fall to the original unsupported api code below
 
     run = self.get_current_run()
     if run and run.get_api_count() > self.max_api_count:
@@ -145,58 +148,80 @@ def handle_import_func(self, dll, name):
         self.on_run_complete()
 
 class MonitoredSection:
-    def __init__(self, section_type, start, size):
+    def __init__(self, section_type, start, size, scan_thresholds=[]):
         self.section_type = section_type
         self.start = start
         self.size = size
         self.end = start+size
         self.written = 0
+        self.scan_thresholds = scan_thresholds
+
     def __repr__(self):
         return 'MonitoredSection: Type: {}, range: 0x{:08X}-0x{:08X} Bytes Written: 0x{:08X}'.format(self.section_type, self.start, self.start+self.size, self.written)
     def __str__(self):
         return self.__repr__()
+    
 
 
 class Unpacker(speakeasy.Speakeasy):
 
-    def __init__(self, path, trace=False, trace_regs=False, dump_dir=None, monitor_execs=False, 
-                 monitor_writes=False, output='debug', libcache=True, shellcode=False, 
-                 function=None, carve=False, arch='x86', timeout=30):
+    def __init__(self, path, config_path, **kwargs):
 
         super(Unpacker, self).__init__(debug=False)
         self.path = path
-        self.trace = trace
-        self.trace_regs = trace_regs
         self.exec_sections = {}
         self.write_sections = {}
-        self.monitor_writes = monitor_writes
-        self.monitor_execs = monitor_execs
-        self.tracing = False
-        self.hooks = {}
-        self.function = function
-        self.carve = carve
-        self.timeout = timeout
 
-        if arch == 'x86':
+        self.logger = logging.getLogger('Unpacker')
+
+        self.load_config(config_path, **kwargs)
+
+        if self.arch == 'x86':
             self.arch = e_arch.ARCH_X86
-        elif arch in ('x64', 'amd64'):
+        elif self.arch in ('x64', 'amd64'):
             self.arch = e_arch.ARCH_AMD64
         else:
             raise Exception('Unsupported architecture: %s' % arch)
 
-        if not dump_dir:
+        with open(self.path, 'rb') as fp:
+            data = fp.read()
+
+        if not self.dump_dir:
             self.dump_dir = tempfile.mkdtemp()
         else:
             self.dump_dir = dump_dir
 
-        self.logger = logging.getLogger('Unpacker')
+        if self.yara_dir:
+            self.yara_rules = build_rules(self.yara_dir)
+            self.initial_matches = set([match.rule for match in self.yara_rules.match(data=data)])
+            self.logger.info(f'Initial yara matches: {self.initial_matches}')
+            self.new_matches = []
+        else:
+            self.yara_rules = None
+
+        if self.strings:
+            candidates = [os.path.join(os.getcwd(), 'strings.yar'), os.path.join(os.path.join(sys.path[0], 'interesting_strings.yar'))]
+            for candidate in candidates:
+                if os.path.exists(candidate):
+                    self.strings_rule = build_rules('strings.yar') 
+                    break
+            if not hasattr(self, 'strings_rule'):
+                self.logger.error(f'Failed to locate strings.yar. Looked in {candidates}')
+                self.strings = False
+            else:
+                matches = self.strings_rule.match(data=data)
+                self.initial_strings = self.parse_string_matches(matches)
+                self.dynamic_strings = []
+            
+
         handler = logging.FileHandler(os.path.join(self.dump_dir, 'unpacker.log'))
         handler.setLevel(logging.DEBUG)
         self.logger.addHandler(handler)
 
-        
+
+
         try:
-            self.pe = pefile.PE(self.path)
+            self.pe = pefile.PE(data=data)
         except Exception as e:
             self.logger.info(f'{self.path} is not a PE file, assuming shellcode')
             self.pe = None
@@ -204,6 +229,50 @@ class Unpacker(speakeasy.Speakeasy):
 
         if self.trace:
             self.start_trace()
+
+
+    def parse_string_matches(self, matches):
+        return substring_sieve([match[2] for match in matches[0].strings])
+
+    def load_config(self, config_path=None, **kwargs):
+        """ 
+            Ensure required config options are present where mandatory
+            and set defaults for those that are not mandatory
+            Precedence: CLI > config > defaults
+        """
+        candidates = [os.path.join(os.getcwd(), 'config.yml'), os.path.join(os.path.join(sys.path[0], 'config.yml'))]
+        print(candidates)
+        if config_path:
+            candidates = [config_path]
+        for candidate in candidates:
+            self.logger.debug(f'Trying to load config from {candidate}')
+            try:
+                with open(candidate, 'r') as fp:
+                    self.unpacker_config = yaml.safe_load(fp)
+                self.unpacker_config_file = candidate
+                self.unpacker_config_dir = os.path.dirname(os.path.abspath(candidate))
+                break
+            except Exception as e:
+                self.logger.info('Failed to load %s: %s' % (candidate, e))
+                pass
+
+        # If these options are defined via cli args, overwrite values from config
+        DEFAULTS = {'yara_dir': None, 'trace': False, 'trace_regs': False, 'arch': 'x86',
+                    'timeout': 30, 'unsupported_api': None, 'api_max': 100, 'carve_pe': True,
+                    'monitor_writes': True, 'min_write': 10, 'monitor_execs': False, 'dump_dir': '/tmp',
+                    'export': None, 'scan_thresholds': [], 'strings': True}
+
+        for key, default in DEFAULTS.items():
+            if not (kwargs.get(key, None) or key in self.unpacker_config):
+                self.logger.warning(f'{key} not defined in {self.unpacker_config_file} and not provided via args. Defaulting to {default}')
+                setattr(self, key, default)
+            elif kwargs.get(key, None):
+                self.logger.debug(f'self.{key} = {kwargs[key]} from CLI')
+                setattr(self, key, kwargs[key])
+            else:
+                self.logger.debug(f'self.{key} = {self.unpacker_config[key]} from CONFIG')
+                setattr(self, key, self.unpacker_config[key])
+
 
     def hooked_mem_map(self, size, base=None, perms=common.PERM_MEM_RWX,
                 tag=None, flags=0, shared=False, process=None):
@@ -251,7 +320,29 @@ class Unpacker(speakeasy.Speakeasy):
             self.hook_code(Unpacker.trace_cb, count)
     """
 
-
+    def scan(self, section):
+        data = self.mem_read(section.start, section.size)
+        if self.yara_rules:
+            matches = self.yara_rules.match(data=data)
+            matches = [match for match in self.yara_rules.match(data=data) if match.rule not in self.initial_matches] 
+            if matches:
+                self.logger.warning(f'New yara matches found in {section}: {matches}')
+                self.new_matches += matches
+        if self.strings:
+            matches = self.strings_rule.match(data=data)
+            if matches:
+                matches = self.parse_string_matches(matches)
+                new = []
+                for string in substring_sieve(self.initial_strings, matches):
+                    try:
+                        new.append(string.decode('utf-16le').encode('ascii'))
+                    except:
+                        new.append(string)
+                self.logger.debug(f'New strings found in {section}: {new}')
+                self.dynamic_strings += new
+                
+        
+    
 
     def trace_cb(self, address, size, count):
         rtn = '{:120s}'.format(disasm(self, self.disassembler, address, size, count))
@@ -274,7 +365,18 @@ class Unpacker(speakeasy.Speakeasy):
                 self.logger.info('Dumping monitored sections...')
                 for section in all_sections:
                     self.logger.info(section)
+                    self.scan(section)
                     self.dump_section(section)
+        if self.strings:
+            print('Dynamic Strings:')
+            self.dynamic_strings = list(set(self.dynamic_strings))
+            for string in self.dynamic_strings: 
+                print(f'\t{string}')
+        if self.yara_rules:
+            print('Dynamic Yara Matches:')
+            for match in set(self.new_matches):
+                print(f'\t{match.rule}')
+
 
     def dump_section(self, section, addr=None):
         try:
@@ -287,7 +389,7 @@ class Unpacker(speakeasy.Speakeasy):
             with open(path, 'wb') as fp:
                 self.logger.info('Dumping 0x%X bytes to %s' % (section.size, path))
                 fp.write(data)
-            if self.carve:
+            if self.carve_pe:
                 carved_pes = carve(data)
                 if carved_pes:
                     self.logger.info(f'Found {len(carved_pes)} PE files in {section}')
@@ -326,23 +428,32 @@ class Unpacker(speakeasy.Speakeasy):
                         self.logger.debug('Caught write to monitored memory section 0x%X-0x%X. Value: 0x%X' % 
                             (section.start, section.end, value))
                     section.written += size
+                if section.scan_thresholds:
+                    progress = section.written/section.size
+                    surpassed = [x for x in section.scan_thresholds if x <= progress]
+                    section.scan_thresholds = list(set(section.scan_thresholds) - set(surpassed))
+                    if surpassed:
+                        self.logger.debug(f'{section} {progress*100}% written. Passed scan thesholds: {surpassed}. Scanning...')
+                        self.scan(section)
             except Exception as e:
                 self.logger.error(traceback.format_exc())
                 exit()
 
     def watch_writes(self, addr, size):
         self.logger.debug('Watching 0x{:08X}-0x{:08X} for Write/Free'.format(addr, addr+size))
-        section = MonitoredSection('write', addr, size)
+        section = MonitoredSection('write', addr, size, self.scan_thresholds)
         self.write_sections[addr] = section
         self.add_mem_write_hook(self.monitor_section_write, begin=section.start, end=section.end)
 
     def watch_execs(self, addr, size):
         self.logger.debug('Watching 0x{:08X}-0x{:08X} for Exec'.format(addr, addr+size))
-        section = MonitoredSection('execution', addr, size)
+        section = MonitoredSection('execution', addr, size, self.scan_thresholds)
         self.exec_sections[addr] = section
-        if 'monitor_section_execute' not in self.hooks:
-            self.hooks['monitor_section_execute'] = True
+        if not self.code_hook_active:
             self.add_code_hook(self.monitor_section_execute)
+
+    def scan_section(self, section):
+        pass
 
         
     # Emulate the binary from begin until @end, with timeout in @timeout and
@@ -362,11 +473,11 @@ class Unpacker(speakeasy.Speakeasy):
         #Hook the memory mapper so we can set up watches
         self.original_mem_map = self.emu.mem_map
         self.emu.mem_map = self.hooked_mem_map
-        #TODO hook mem unmapper for dumping
+        #Hook mem unmapper
         self.original_mem_unmap = self.emu.mem_unmap
         self.emu.mem_unmap = self.hooked_mem_unmap
 
-        #self.emu.handle_import_func = handle_import_func
+        #Hook api function handler
         self.emu.handle_import_func = types.MethodType(handle_import_func, self.emu)
 
         try:
@@ -381,13 +492,13 @@ class Unpacker(speakeasy.Speakeasy):
                 # Set up some args for the export
                 arg0 = 0x0
                 arg1 = 0x1
-                if self.function:
-                    exports = [exp for exp in module.get_exports() if exp.name == self.function]
+                if self.export:
+                    exports = [exp for exp in module.get_exports() if exp.name == self.export]
                 else:
                     exports = module.get_exports()
 
                 if not exports:
-                    self.logger.error(f'Unable to find export {self.function}')
+                    self.logger.error(f'Unable to find export {self.export}')
                     return
                 for exp in exports:
                     try:
@@ -414,17 +525,18 @@ class Unpacker(speakeasy.Speakeasy):
 def parse_args():
     usage = "unpack.py [OPTION]... [FILES]..."
     parser = argparse.ArgumentParser(description=usage)
+    parser.add_argument("-C", "--config", action="store", default=None,
+      help="config file. Defaults to config.yml in same dir as unpack.py")
     parser.add_argument("-r", "--reg", help="Dump register values with trace option", action='store_true', default=False)
     parser.add_argument("-t", "--trace", help="Enable full trace", action='store_true', default=False)
-    parser.add_argument("-T", "--timeout", help="timeout", default=60, type=int)
+    parser.add_argument("-T", "--timeout", help="timeout", default=None, type=int)
     parser.add_argument("-d", "--dump", help="directory to dump memory regions and logs to", default=None)
-    parser.add_argument("-e", "--dump-exec", help="dump dynamically allocated sections if code is executed from them", action='store_true', default=False)
-    parser.add_argument("-w", "--dump-write", help="dump dynamically allocated sections if data is written to them", action='store_true', default=False)
+    parser.add_argument("-e", "--monitor-dumps", dest='monitor_execs', help="dump dynamically allocated sections if code is executed from them", action='store_true', default=False)
     parser.add_argument("-E", "--export", help="If file is a dll run only dllmain and specified export, otherwise default to all exports", action='store', default=None)
     parser.add_argument("-S", "--strings", help="Report new strings from dumped files", default=False, action="store_true")
     parser.add_argument("-y", "--yara", help="Report new yara results from dumped files", default=False, action="store_true")
-    parser.add_argument("-c", "--carve", help="Attempt to carve PE files from dumped sections", default=False, action="store_true")
-    parser.add_argument("-a", "--arch", help="If input is shellcode, define architechture x86 or x64", default='x86', action="store")
+    parser.add_argument("-c", "--carve", dest='carve_pe', help="Attempt to carve PE files from dumped sections", default=False, action="store_true")
+    parser.add_argument("-a", "--arch", help="If input is shellcode, define architechture x86 or x64", default=None, action="store")
     parser.add_argument('-v', '--verbose', action='count', default=0, 
         help='Increase verbosity. Can specify multiple times for more verbose output')
     parser.add_argument('files', nargs='*')
@@ -437,9 +549,7 @@ if __name__ == "__main__":
 
     for arg in options.files:
         for path in recursive_all_files(arg):
-            unpacker = Unpacker(path=path, trace=options.trace, trace_regs=options.reg, dump_dir=options.dump, 
-                                monitor_execs=options.dump_exec, monitor_writes=options.dump_write, 
-                                function=options.export, carve=options.carve, arch=options.arch, timeout=options.timeout)
+            unpacker = Unpacker(path=path, config_path=options.config, **vars(options))
             try:
                 unpacker.run()
             except Exception as e:

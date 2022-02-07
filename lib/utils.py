@@ -4,6 +4,11 @@ import re
 import struct
 import pefile
 import logging
+import yara
+import logging
+from hashlib import md5
+from time import time, sleep
+from multiprocessing import Pool, cpu_count
 
 def configure_logger(log_level):
     log_levels = {0: logging.ERROR, 1: logging.WARNING, 2: logging.INFO, 3: logging.DEBUG}
@@ -150,3 +155,92 @@ def human_size(nbytes):
     f = ('%s' % float('%.3g' % nbytes)).rstrip('0').rstrip('.')
     return '%s %s' % (f, suffixes[i])
 
+def compile_rule(rulefile, include_compiled=False):
+    try:
+        key = os.path.splitext(os.path.split(rulefile)[1])[0]
+        start = time()
+        rule = yara.compile(filepaths={key: rulefile})
+        rtn = {'key': key, 'rulefile': rulefile, 'compile_time': time() - start}
+        if include_compiled:
+            rtn['rule'] = rule
+        return rtn
+    except Exception as e:
+        print('rule %s failed to compile! Error: %s' % (rulefile, e))
+    return None
+
+def test_compile(file_list, individual_rules=False):
+    rtn = {}
+    # Can't use a pool since we can't pickle the compiled rule objects to send across the queue
+    if individual_rules:
+        for f in file_list:
+            compiled = compile_rule(f, include_compiled=True)
+            if compiled:
+                rtn[compiled['key']] = compiled
+    
+    else:
+        pool = Pool(4)
+        results = pool.map(compile_rule, file_list)
+        for item in results:
+            if item:
+                rtn[item['key']] = item['rulefile']
+    return rtn
+
+def rules_hash(file_list):
+    rtn = {}
+    to_hash = ""
+    for path in sorted(file_list):
+        to_hash += '%s%s' % (os.path.basename(path),str(os.path.getmtime(path)))
+    return md5(to_hash.encode()).hexdigest() 
+
+def build_rules(signature_dir, profile_rules=False):
+    logger = logging.getLogger('Yara Compiler')
+    file_list = recursive_all_files(signature_dir,'yar')
+    _hash = rules_hash(file_list)
+    if profile_rules:
+        return test_compile(file_list, individual_rules=True)
+    path = os.path.join('/tmp/', '%s.py3.cyar' % (_hash))
+    if os.path.isfile(path):
+        logger.debug('Up to date compiled rules already exist at %s. Using those' % (path))
+        return yara.load(path)
+
+    start = time()
+    rulefile_paths = test_compile(file_list)
+    elapsed = time() - start
+    logger.debug('Test compiled %s rules in %s seconds.' % (len(rulefile_paths), round(elapsed,2)))
+
+    start = time()
+    try:
+        compiled_rules = yara.compile(filepaths=rulefile_paths)
+    except Exception as e:
+        logger.error('Exception compiling rules: %s' % (e))
+    elapsed = time() - start
+    try:
+        compiled_rules.save(path)
+        os.chmod(path, 0o666)
+    except Exception as e:
+        logger.debug('Failed to save compiled rules %s: %s' % (path,e))
+    compiled_size = os.stat(path).st_size
+
+    logger.debug('Compiled %s rules in %s seconds.' % (len(rulefile_paths), round(elapsed,2)))
+    logger.debug('Compiled rule size is %s' % (human_size(compiled_size,)))
+    return compiled_rules
+
+def substring_sieve(string_list, string_list2=None):
+    """
+        1 arg: remove any string that is a substring of any other
+        2 args: remove any string form list1 that is a substring of any string in list 2
+    """
+    if not string_list2:
+        string_list.sort(key=lambda s: len(s), reverse=True)
+        out = []
+        for s in string_list:
+            if not any([s in o for o in out]):
+                out.append(s)
+        return out
+    else:
+        out = []
+        for s in string_list:
+            if not any([s in o for o in string_list2]):
+                out.append(s)
+        return out
+        
