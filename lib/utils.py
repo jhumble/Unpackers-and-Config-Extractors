@@ -1,3 +1,4 @@
+import sys
 import os
 import fractions
 import re
@@ -9,6 +10,7 @@ import logging
 from hashlib import md5
 from time import time, sleep
 from multiprocessing import Pool, cpu_count
+from binascii import hexlify
 
 def configure_logger(log_level):
     log_levels = {0: logging.ERROR, 1: logging.WARNING, 2: logging.INFO, 3: logging.DEBUG}
@@ -244,3 +246,48 @@ def substring_sieve(string_list, string_list2=None):
                 out.append(s)
         return out
         
+def spaced_hex(data):
+    return b' '.join(hexlify(data)[i:i + 2] for i in range(0, len(hexlify(data)), 2)).decode('utf-8')
+
+class colors:
+    if sys.stdout.isatty():
+        BLUE = '\033[94m'
+        GREEN = '\033[92m'
+        YELLOW = '\033[93m'
+        RED = '\033[91m'
+        ENDC = '\033[0m'
+        BOLD = '\033[1m'
+        UNDERLINE = '\033[4m'
+    else:
+        HEADER = ''
+        BLUE = ''
+        GREEN = ''
+        YELLOW = ''
+        RED = ''
+        ENDC = ''
+        BOLD = ''
+        UNDERLINE = ''
+
+
+def dump_regs(emu):
+    regs = emu.get_register_state()
+
+    if not hasattr(dump_regs, 'regs'):
+        dump_regs.regs = regs
+
+    rtn = ''
+
+    # build string in order
+    for reg, val in regs.items():
+        #val = '{}: {}    '.format(reg.upper(), regs[reg])
+        val = f'{reg.upper()}: {dump_regs.regs[reg]} -> {regs[reg]}'
+
+        if regs[reg] != dump_regs.regs[reg] and reg != 'rip' and reg != 'eip':
+            #rtn += colors.RED + val + colors.ENDC
+            rtn += val
+        #else:
+        #    rtn += val
+
+    dump_regs.regs = regs
+
+    return rtn

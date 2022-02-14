@@ -11,6 +11,7 @@ import pefile
 import traceback
 import tempfile
 import sys
+from capstone import *
 from pathlib import Path
 from func_timeout import func_timeout, FunctionTimedOut
 from speakeasy.winenv.api import api
@@ -91,6 +92,9 @@ def handle_import_func(self, dll, name):
             self._dynamic_code_cb(self, ret, 0, {})
 
         # Log the API args and return value
+        if imp_api not in self.api_counts:
+            self.api_counts[imp_api] = 1
+
         if self.api_counts[imp_api] < self.api_log_max:
             self.log_api(oret, imp_api, rv, argv)
             self.api_counts[imp_api] += 1
@@ -127,7 +131,7 @@ def handle_import_func(self, dll, name):
             imp_api = '%s.%s' % (dll, name)
             try:
                 argc = self.win_functions[name]
-                self.logger.debug(f'Emulating unimplemented API: {imp_api}')
+                self.logger.debug(f'Emulating unimplemented API: {imp_api} with argc = {argc}')
                 conv = e_arch.CALL_CONV_STDCALL
                 argv = self.get_func_argv(conv, argc)
                 rv = 0
@@ -155,6 +159,9 @@ class MonitoredSection:
         self.end = start+size
         self.written = 0
         self.scan_thresholds = scan_thresholds
+        self.dump = False
+        self.strings = []
+        self.yara_matches = []
 
     def __repr__(self):
         return 'MonitoredSection: Type: {}, range: 0x{:08X}-0x{:08X} Bytes Written: 0x{:08X}'.format(self.section_type, self.start, self.start+self.size, self.written)
@@ -171,20 +178,30 @@ class Unpacker(speakeasy.Speakeasy):
         self.path = path
         self.exec_sections = {}
         self.write_sections = {}
+        self.tracing = False
+        self.trace_instr_count = 0
 
         self.logger = logging.getLogger('Unpacker')
+
+        with open(self.path, 'rb') as fp:
+            data = fp.read()
+
+        try:
+            self.pe = pefile.PE(data=data)
+        except Exception as e:
+            self.logger.info(f'{self.path} is not a PE file, assuming shellcode')
+            self.pe = None
 
         self.load_config(config_path, **kwargs)
 
         if self.arch == 'x86':
             self.arch = e_arch.ARCH_X86
+            self.disassembler = Cs(CS_ARCH_X86, CS_MODE_32)
         elif self.arch in ('x64', 'amd64'):
             self.arch = e_arch.ARCH_AMD64
+            self.disassembler = Cs(CS_ARCH_X86, CS_MODE_64)
         else:
             raise Exception('Unsupported architecture: %s' % arch)
-
-        with open(self.path, 'rb') as fp:
-            data = fp.read()
 
         if not self.dump_dir:
             self.dump_dir = tempfile.mkdtemp()
@@ -200,7 +217,7 @@ class Unpacker(speakeasy.Speakeasy):
             self.yara_rules = None
 
         if self.strings:
-            candidates = [os.path.join(os.getcwd(), 'strings.yar'), os.path.join(os.path.join(sys.path[0], 'interesting_strings.yar'))]
+            candidates = [os.path.join(os.getcwd(), 'strings.yar'), os.path.join(os.path.join(sys.path[0], 'strings.yar'))]
             for candidate in candidates:
                 if os.path.exists(candidate):
                     self.strings_rule = build_rules('strings.yar') 
@@ -220,19 +237,26 @@ class Unpacker(speakeasy.Speakeasy):
 
 
 
-        try:
-            self.pe = pefile.PE(data=data)
-        except Exception as e:
-            self.logger.info(f'{self.path} is not a PE file, assuming shellcode')
-            self.pe = None
-
 
         if self.trace:
             self.start_trace()
 
 
+    def disasm(self, address: int, size: int):
+        buf = self.mem_read(address, size)
+        try:
+            for i in self.disassembler.disasm(buf, address):
+                return "{:08X}\t{:08X}: {:24s} {:10s} {:16s}".format(self.trace_instr_count, i.address, spaced_hex(buf), i.mnemonic,
+                                                                     i.op_str)
+        except:
+            import traceback
+            print(traceback.format_exc())
+
     def parse_string_matches(self, matches):
-        return substring_sieve([match[2] for match in matches[0].strings])
+        if matches: 
+            return substring_sieve([match[2] for match in matches[0].strings])
+        else:
+            return []
 
     def load_config(self, config_path=None, **kwargs):
         """ 
@@ -255,12 +279,22 @@ class Unpacker(speakeasy.Speakeasy):
             except Exception as e:
                 self.logger.info('Failed to load %s: %s' % (candidate, e))
                 pass
+        
+        #handle arch differently, since if the file is a PE file we can just get the architecture type from it
+        if self.pe and not kwargs.get('arch'):
+            arch = self.pe.OPTIONAL_HEADER.Magic
+            if arch == 0x10b:
+                arch_default = 'x86'
+            elif arch == 0x20B:
+                arch_default = 'x64'
+        else:
+            arch_default = 'x86'
 
         # If these options are defined via cli args, overwrite values from config
-        DEFAULTS = {'yara_dir': None, 'trace': False, 'trace_regs': False, 'arch': 'x86',
+        DEFAULTS = {'yara_dir': None, 'trace': False, 'trace_regs': False, 'arch': arch_default,
                     'timeout': 30, 'unsupported_api': None, 'api_max': 100, 'carve_pe': True,
                     'monitor_writes': True, 'min_write': 10, 'monitor_execs': False, 'dump_dir': '/tmp',
-                    'export': None, 'scan_thresholds': [], 'strings': True}
+                    'export': None, 'scan_thresholds': [], 'strings': True, 'only_dump_matched': False}
 
         for key, default in DEFAULTS.items():
             if not (kwargs.get(key, None) or key in self.unpacker_config):
@@ -302,7 +336,7 @@ class Unpacker(speakeasy.Speakeasy):
         free = []
         for addr, section in self.write_sections.items():
             if base >= section.start and base < section.end and section.written >= 100: #TODO Make config item
-                self.logger.info(f'Program attempting to free monitored and written-to section {section}. Dumping...')
+                self.logger.debug(f'Program attempting to free monitored and written-to section {section}. Dumping...')
                 self.dump_section(section)
                 free.append(addr)
 
@@ -311,14 +345,22 @@ class Unpacker(speakeasy.Speakeasy):
 
         return self.original_mem_unmap(base, size)
         
-    """
 
     def start_trace(self):
         if not self.tracing:
             self.tracing = True
-            count = [0]
-            self.hook_code(Unpacker.trace_cb, count)
-    """
+            self.add_code_hook(self.trace_cb)
+
+    def trace_cb(self, emu, address, size, ctx):
+
+        rtn = '{:120s}'.format(self.disasm(address, size))
+        if self.trace_regs:
+            try:
+                rtn += dump_regs(emu)
+            except:
+                self.logger.error(traceback.format_exc())
+        self.logger.info(rtn)
+        self.trace_instr_count +=1
 
     def scan(self, section):
         data = self.mem_read(section.start, section.size)
@@ -328,6 +370,7 @@ class Unpacker(speakeasy.Speakeasy):
             if matches:
                 self.logger.warning(f'New yara matches found in {section}: {matches}')
                 self.new_matches += matches
+                section.yara_matches += matches
         if self.strings:
             matches = self.strings_rule.match(data=data)
             if matches:
@@ -340,22 +383,8 @@ class Unpacker(speakeasy.Speakeasy):
                         new.append(string)
                 self.logger.debug(f'New strings found in {section}: {new}')
                 self.dynamic_strings += new
+                section.strings += new
                 
-        
-    
-
-    def trace_cb(self, address, size, count):
-        rtn = '{:120s}'.format(disasm(self, self.disassembler, address, size, count))
-        if self.trace_regs:
-            try:
-                if self.pointersize == 8:
-                    rtn += dump_regs_x64(self, address, size)
-                else:
-                    rtn += dump_regs(self, address, size)
-            except:
-                self.logger.error(traceback.format_exc())
-        self.logger.debug(rtn)
-        count[0] += 1
 
     def dump(self):
         if self.dump_dir: 
@@ -364,14 +393,16 @@ class Unpacker(speakeasy.Speakeasy):
             if len(all_sections) > 0:
                 self.logger.info('Dumping monitored sections...')
                 for section in all_sections:
-                    self.logger.info(section)
-                    self.scan(section)
+
                     self.dump_section(section)
         if self.strings:
             print('Dynamic Strings:')
             self.dynamic_strings = list(set(self.dynamic_strings))
             for string in self.dynamic_strings: 
-                print(f'\t{string}')
+                try:
+                    print(f'\t{string.decode()}')
+                except:
+                    print(f'\t{string}')
         if self.yara_rules:
             print('Dynamic Yara Matches:')
             for match in set(self.new_matches):
@@ -379,6 +410,15 @@ class Unpacker(speakeasy.Speakeasy):
 
 
     def dump_section(self, section, addr=None):
+        self.scan(section)
+        if section.written < self.min_write:
+            return
+        if self.only_dump_matched and not (section.strings or section.yara_matches):
+            self.logger.debug(f'Skip dumping {section} (no matches or new strings)')
+            return
+        if self.only_dump_matched and section.written < self.min_write:
+            self.logger.debug(f'Skip dumping {section} Bytes written < minimum:  {section.written} < {self.min_write}')
+            return 
         try:
             os.makedirs(self.dump_dir, exist_ok=True)
             data = self.mem_read(section.start, section.size)
@@ -469,7 +509,7 @@ class Unpacker(speakeasy.Speakeasy):
         self.emu.max_api_count = 10**6
         self.emu.api_counts = {}
         self.emu.api_log_max = 100
-
+        
         #Hook the memory mapper so we can set up watches
         self.original_mem_map = self.emu.mem_map
         self.emu.mem_map = self.hooked_mem_map
@@ -527,7 +567,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description=usage)
     parser.add_argument("-C", "--config", action="store", default=None,
       help="config file. Defaults to config.yml in same dir as unpack.py")
-    parser.add_argument("-r", "--reg", help="Dump register values with trace option", action='store_true', default=False)
+    parser.add_argument("-r", "--reg", dest='trace_regs', help="Dump register values with trace option", action='store_true', default=False)
     parser.add_argument("-t", "--trace", help="Enable full trace", action='store_true', default=False)
     parser.add_argument("-T", "--timeout", help="timeout", default=None, type=int)
     parser.add_argument("-d", "--dump", help="directory to dump memory regions and logs to", default=None)
@@ -537,6 +577,7 @@ def parse_args():
     parser.add_argument("-y", "--yara", help="Report new yara results from dumped files", default=False, action="store_true")
     parser.add_argument("-c", "--carve", dest='carve_pe', help="Attempt to carve PE files from dumped sections", default=False, action="store_true")
     parser.add_argument("-a", "--arch", help="If input is shellcode, define architechture x86 or x64", default=None, action="store")
+    parser.add_argument("-D", "--dump-matched", dest="only_dump_matched", help="Only dump memory sections containing new strings or yara matches", default=None, action="store")
     parser.add_argument('-v', '--verbose', action='count', default=0, 
         help='Increase verbosity. Can specify multiple times for more verbose output')
     parser.add_argument('files', nargs='*')
