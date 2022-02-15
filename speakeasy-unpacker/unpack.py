@@ -411,7 +411,6 @@ class Unpacker(speakeasy.Speakeasy):
 
     def dump_section(self, section, addr=None):
         data = self.scan(section)
-        data = self.mem_read(section.start, section.size)
         found_pe = False
 
         if self.carve_pe:
