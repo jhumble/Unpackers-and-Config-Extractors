@@ -384,6 +384,7 @@ class Unpacker(speakeasy.Speakeasy):
                 self.logger.debug(f'New strings found in {section}: {new}')
                 self.dynamic_strings += new
                 section.strings += new
+        return data
                 
 
     def dump(self):
@@ -409,8 +410,10 @@ class Unpacker(speakeasy.Speakeasy):
 
 
     def dump_section(self, section, addr=None):
-        self.scan(section)
+        data = self.scan(section)
+        data = self.mem_read(section.start, section.size)
         found_pe = False
+
         if self.carve_pe:
             carved_pes = carve(data)
             if carved_pes:
@@ -433,7 +436,6 @@ class Unpacker(speakeasy.Speakeasy):
                 return 
         try:
             os.makedirs(self.dump_dir, exist_ok=True)
-            data = self.mem_read(section.start, section.size)
             if addr:
                 path = os.path.join(self.dump_dir, '%s_%X-%X_%X' % (os.path.basename(self.path), section.start, section.end, addr))
             else:
@@ -495,9 +497,6 @@ class Unpacker(speakeasy.Speakeasy):
         self.exec_sections[addr] = section
         if not self.code_hook_active:
             self.add_code_hook(self.monitor_section_execute)
-
-    def scan_section(self, section):
-        pass
 
         
     # Emulate the binary from begin until @end, with timeout in @timeout and
