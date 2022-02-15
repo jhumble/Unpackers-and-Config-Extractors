@@ -21,7 +21,13 @@ def main():
             for line in lines:
                 match = regex.search(line)
                 if match:
-                    func_to_args[match.group('name')] = match.group('args').count(',') + 1
+                    args = match.group('args')
+                    name = match.group('name')
+                    if len(args) < 2 or args.lower() == 'void':
+                        print(f'{name}, argc = 0')
+                        func_to_args[name] = 0
+                    else:
+                        func_to_args[name] = args.count(',') + 1
                     #print(match.groupdict())
         except Exception as e:
             print(f'[!]\tParsing failed on {path}: {e}')

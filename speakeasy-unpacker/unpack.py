@@ -393,7 +393,6 @@ class Unpacker(speakeasy.Speakeasy):
             if len(all_sections) > 0:
                 self.logger.info('Dumping monitored sections...')
                 for section in all_sections:
-
                     self.dump_section(section)
         if self.strings:
             print('Dynamic Strings:')
@@ -411,14 +410,27 @@ class Unpacker(speakeasy.Speakeasy):
 
     def dump_section(self, section, addr=None):
         self.scan(section)
-        if section.written < self.min_write:
-            return
-        if self.only_dump_matched and not (section.strings or section.yara_matches):
-            self.logger.debug(f'Skip dumping {section} (no matches or new strings)')
-            return
-        if self.only_dump_matched and section.written < self.min_write:
-            self.logger.debug(f'Skip dumping {section} Bytes written < minimum:  {section.written} < {self.min_write}')
-            return 
+        found_pe = False
+        if self.carve_pe:
+            carved_pes = carve(data)
+            if carved_pes:
+                self.logger.info(f'Found {len(carved_pes)} PE files in {section}')
+            for pe in carved_pes:
+                path = os.path.join(self.dump_dir, f'{os.path.basename(self.path)}_{section.start+pe["offset"]:X}-{section.start+pe["offset"]+len(pe["data"]):X}.{pe["ext"]}')
+                self.logger.info(f'[!]\tDumping carved PE file to {path}')
+                found_pe = True
+                with open(path, 'wb') as fp:
+                    fp.write(pe["data"])
+        # if a PE was carved always dump this mem region
+        if not found_pe:
+            if section.written < self.min_write:
+                return
+            if self.only_dump_matched and not (section.strings or section.yara_matches):
+                self.logger.debug(f'Skip dumping {section} (no matches or new strings)')
+                return
+            if self.only_dump_matched and section.written < self.min_write:
+                self.logger.debug(f'Skip dumping {section} Bytes written < minimum:  {section.written} < {self.min_write}')
+                return 
         try:
             os.makedirs(self.dump_dir, exist_ok=True)
             data = self.mem_read(section.start, section.size)
@@ -429,15 +441,7 @@ class Unpacker(speakeasy.Speakeasy):
             with open(path, 'wb') as fp:
                 self.logger.info('Dumping 0x%X bytes to %s' % (section.size, path))
                 fp.write(data)
-            if self.carve_pe:
-                carved_pes = carve(data)
-                if carved_pes:
-                    self.logger.info(f'Found {len(carved_pes)} PE files in {section}')
-                for pe in carved_pes:
-                    path = os.path.join(self.dump_dir, f'{os.path.basename(self.path)}_{section.start+pe["offset"]:X}-{section.start+pe["offset"]+len(pe["data"]):X}.{pe["ext"]}')
-                    self.logger.info(f'[!]\tDumping carved PE file to {path}')
-                    with open(path, 'wb') as fp:
-                        fp.write(pe["data"])
+
         except Exception as e:
             self.logger.error(traceback.format_exc())
 
