@@ -1,5 +1,5 @@
 #yara directory of rules for extracting interesting strings
-yara_dir: /Users/jhumble/ice-53-yara-rules
+yara_dir: /Users/jhumble/yara-rules
 trace: false # output every assembly instruction
 trace_regs: false # output registers with every assembly instruction
 timeout: 30
