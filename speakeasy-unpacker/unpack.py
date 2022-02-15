@@ -205,8 +205,7 @@ class Unpacker(speakeasy.Speakeasy):
 
         if not self.dump_dir:
             self.dump_dir = tempfile.mkdtemp()
-        else:
-            self.dump_dir = dump_dir
+        os.makedirs(self.dump_dir, exist_ok=True)
 
         if self.yara_dir:
             self.yara_rules = build_rules(self.yara_dir)
@@ -410,9 +409,10 @@ class Unpacker(speakeasy.Speakeasy):
 
 
     def dump_section(self, section, addr=None):
-        data = self.scan(section)
-        found_pe = False
 
+        data = self.scan(section)
+
+        found_pe = False
         if self.carve_pe:
             carved_pes = carve(data)
             if carved_pes:
@@ -434,7 +434,7 @@ class Unpacker(speakeasy.Speakeasy):
                 self.logger.debug(f'Skip dumping {section} Bytes written < minimum:  {section.written} < {self.min_write}')
                 return 
         try:
-            os.makedirs(self.dump_dir, exist_ok=True)
+
             if addr:
                 path = os.path.join(self.dump_dir, '%s_%X-%X_%X' % (os.path.basename(self.path), section.start, section.end, addr))
             else:
@@ -572,7 +572,7 @@ def parse_args():
     parser.add_argument("-r", "--reg", dest='trace_regs', help="Dump register values with trace option", action='store_true', default=False)
     parser.add_argument("-t", "--trace", help="Enable full trace", action='store_true', default=False)
     parser.add_argument("-T", "--timeout", help="timeout", default=None, type=int)
-    parser.add_argument("-d", "--dump", help="directory to dump memory regions and logs to", default=None)
+    parser.add_argument("-d", "--dump", dest='dump_dir', help="directory to dump memory regions and logs to", default=None)
     parser.add_argument("-e", "--monitor-dumps", dest='monitor_execs', help="dump dynamically allocated sections if code is executed from them", action='store_true', default=False)
     parser.add_argument("-E", "--export", help="If file is a dll run only dllmain and specified export, otherwise default to all exports", action='store', default=None)
     parser.add_argument("-S", "--strings", help="Report new strings from dumped files", default=False, action="store_true")
