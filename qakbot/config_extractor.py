@@ -27,6 +27,8 @@ def parse_args():
       help="Path to dump json configuration to")
     arg_parser.add_argument("-s", "--strings", action="store_true", default=None,
       help="Write decrypted strings to stdout")
+    arg_parser.add_argument("-b", "--brute-strings", dest='brute', action="store_true", default=False,
+      help="Try all decrypted strings as passphrases for decrypting C2 data")
     arg_parser.add_argument('files', nargs='+')
     return arg_parser.parse_args()
 
@@ -45,8 +47,11 @@ class ConfigExtractor:
         self.path = None
 
         
-    def extract(self, path):
+    def extract(self, path, brute=False):
         self.path = path
+        # Some variants (afa3e64cc7630942151d414d3fe472a6 -- unpacked from 10ec9ebbb3af2ca6181f33d358cfb8a6) seem to 
+        # have misspelled passwords (Sha1("\\System32\\WindowsPowerShel1\\v1.0\\powershel1.exe")) and require the brute option to decrypt.
+        self.brute = brute
         with open(self.path, 'rb') as fp:
             self.data = fp.read()
         self.pe = pefile.PE(self.path, fast_load=False)
@@ -219,7 +224,17 @@ class ConfigExtractor:
             return True, None
         # Newer method: https://seguranca-informatica.pt/a-taste-of-the-latest-release-of-qakbot/
         # TODO uncomment to try all other decrypted strings as passphrases
-        for string in [b'\\System32\\WindowsPowerShell\\v1.0\\powershell.exe']:# + list(self.config['decrypted_strings'].values()):
+        if self.brute:
+            string_list = [b'\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'] + list(self.config['decrypted_strings'].values())
+        else:
+            string_list = [b'\\System32\\WindowsPowerShell\\v1.0\\powershell.exe']
+
+        for string in string_list:
+            try:
+                string = string.encode('ascii')
+            except Exception as e:
+                self.logger.error('Failed to decrypt using {string}: {e}')
+                continue
             self.logger.debug(f'Attempt to decrypt with passphrase {string}: {hexlify(string)}')
             res = CustomRC4(hashlib.sha1(string).digest()).decrypt(data)
             if self.parse_resource(res):
@@ -276,7 +291,7 @@ if __name__ == '__main__':
     for path in options.files:
         extractor.logger.info(f'Processing {path}')
         try:
-            extractor.extract(path)
+            extractor.extract(path, brute=options.brute)
             if options.out:
                 extractor.logger.critical(f'Writing config to {options.out}')
                 with open(options.out, 'w') as fp:
