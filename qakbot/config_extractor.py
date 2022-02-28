@@ -225,15 +225,15 @@ class ConfigExtractor:
         # Newer method: https://seguranca-informatica.pt/a-taste-of-the-latest-release-of-qakbot/
         # TODO uncomment to try all other decrypted strings as passphrases
         if self.brute:
-            string_list = [b'\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'] + list(self.config['decrypted_strings'].values())
+            string_list = ['\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'] + list(self.config['decrypted_strings'].values())
         else:
-            string_list = [b'\\System32\\WindowsPowerShell\\v1.0\\powershell.exe']
+            string_list = ['\\System32\\WindowsPowerShell\\v1.0\\powershell.exe']
 
         for string in string_list:
             try:
                 string = string.encode('ascii')
             except Exception as e:
-                self.logger.error('Failed to decrypt using {string}: {e}')
+                self.logger.error(f'Failed to decrypt using {string}: {e}')
                 continue
             self.logger.debug(f'Attempt to decrypt with passphrase {string}: {hexlify(string)}')
             res = CustomRC4(hashlib.sha1(string).digest()).decrypt(data)
