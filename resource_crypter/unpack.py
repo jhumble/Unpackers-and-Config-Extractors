@@ -164,7 +164,7 @@ class Decryptor:
             """
             resname = f'{name}/{_id}'
             #self.logger.debug(f'Processing resource {name}/{_id} length: {len(resdata):08X}')
-            size = int.from_bytes(resdata[:4], byteorder='little')
+            size = int.from_bytes(resdata[:4], byteorder='little') - 4 #First dword is payload length, remove from size
             try:
                 ratio = size/len(resdata)
             except ZeroDivisionError:

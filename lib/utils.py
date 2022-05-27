@@ -37,15 +37,15 @@ def get_section(path, section_name):
 
 
 def nearest_fractions(a,b, max_fractions=10, window=10000, step=.1):
-    found = set()
+    found = []
     for i in range(0, window):
         try:
             frac = fractions.Fraction((a+step*i)/b).limit_denominator(0xFF)
             if frac not in found:
-                found.add(frac)
+                found.append(frac)
             frac = fractions.Fraction((a-step*i)/b).limit_denominator(0xFF)
             if frac not in found:
-                found.add(frac)
+                found.append(frac)
             if len(found) >= max_fractions:
                 #print(f'Fractions nearest to (a/b) = {found}')
                 return list(found)
