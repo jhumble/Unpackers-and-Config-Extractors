@@ -13,7 +13,6 @@ from pathlib import Path
 repo_root = Path(os.path.realpath(__file__)).parent.parent.absolute()
 lib = os.path.join(repo_root, 'lib')
 sys.path.append(lib)
-from rc4 import CustomRC4
 from utils import *
 
 def parse_args():
@@ -163,13 +162,14 @@ class Decryptor:
                     int.from_bytes(resdata[:4], byteorder='little') < len(resdata) + 0x200):
             """
             resname = f'{name}/{_id}'
+            reslength = len(resdata)  - 4 #First dword is payload length, remove from size
             #self.logger.debug(f'Processing resource {name}/{_id} length: {len(resdata):08X}')
-            size = int.from_bytes(resdata[:4], byteorder='little') - 4 #First dword is payload length, remove from size
+            size = int.from_bytes(resdata[:4], byteorder='little')
             try:
                 ratio = size/len(resdata)
             except ZeroDivisionError:
                 continue
-            if size + 4 == len(resdata):
+            if size == reslength:
                 self.logger.info(f'Found resource potentially containing encrypted PE: {name}/{_id}')
                 return self.decrypt_ciphertext(resdata[4:], resname)
             #elif ratio > .75 and ratio < 1.33:
@@ -184,7 +184,7 @@ class Decryptor:
                     We can determine the ratio of copy/skip by comparing the resource's actual size to the size
                     specified in the first 4 bytes
                 """
-                for frac in nearest_fractions(len(resdata), size, max_fractions=100): # Only try the 100 best approximations
+                for frac in nearest_fractions(reslength, size, max_fractions=100): # Only try the 100 best approximations
                     block_size = frac.denominator
                     skip = frac.numerator - block_size
                     for i in range(1,255):
