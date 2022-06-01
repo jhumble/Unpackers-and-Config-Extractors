@@ -1,7 +1,7 @@
 import "pe"
 import "math"
 
-rule Classification_Resource_Crypter {
+rule Classification_CryptOne {
 
     meta:
         tlp = "green"

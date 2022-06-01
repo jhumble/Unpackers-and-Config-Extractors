@@ -41,7 +41,7 @@ def configure_logger(log_level):
 class Decryptor:
 
     def __init__(self, dump=None):
-        self.logger = logging.getLogger('Resource Crypter Unpacker')
+        self.logger = logging.getLogger('CryptOne Unpacker')
         self.unpacked_pe = None
         self.unpacked = None
         self.config = []
@@ -226,7 +226,7 @@ if __name__ == '__main__':
     decryptor = Decryptor(options.dump_dir)
     if options.yara:
         import yara
-        rule_path = os.path.join(repo_root, 'resource_crypter', 'Classification_Resource_Crypter.yar')
+        rule_path = os.path.join(repo_root, 'CryptOne', 'Classification_CryptOne.yar')
         rule = yara.compile(rule_path)
     for arg in options.files:
         for path in recursive_all_files(arg):
