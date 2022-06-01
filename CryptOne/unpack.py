@@ -104,17 +104,10 @@ class Decryptor:
     def decrypt(self, const, data):
         #make a copy
         result = data[:]
-        #dwords = data_to_dwords(data)
-        #for i in range(len(dwords)):
         for i in range(0, len(data), 4):
-            # read dword
-            #print(f'i = {i:08X};', end='')
             x = int.from_bytes(result[i:i+4], byteorder='little', signed=False)
-            #print(f'X = {x:08X};', end='')
             x = ((x+i) & 0xFFFFFFFF)
             x ^= ((const+i) & 0xFFFFFFFF)
-            #print(f'const = {((const+i) & 0xFFFFFFFF):08X};', end='')
-            #print(f'res = {x:08X};')
             result[i:i+4] = x.to_bytes(4, byteorder='little', signed=False)
         return result
 
@@ -145,9 +138,6 @@ class Decryptor:
                     return True
 
 
-            
-        
-
     def unpack(self, path, dump=None):
         self.path = path
         self.pe = pefile.PE(self.path, fast_load=False)
@@ -172,10 +162,6 @@ class Decryptor:
             if size == reslength:
                 self.logger.info(f'Found resource potentially containing encrypted PE: {name}/{_id}')
                 return self.decrypt_ciphertext(resdata[4:], resname)
-            #elif ratio > .75 and ratio < 1.33:
-            #    self.logger.info(f'Found resource containing encrypted PE: {name}/{_id} size ratio: {ratio}')
-            #    self.decrypt_ciphertext(resdata[4:])
-            #elif size < len(resdata) + 0x400:
             elif ratio > .20 and ratio < 1:
                 """
                     in some samples a58567fe17db5d4ee201dfeaa2466e06
