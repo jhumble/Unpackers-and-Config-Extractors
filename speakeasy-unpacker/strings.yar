@@ -11,6 +11,7 @@ rule interesting_strings {
         $key = /----BEGIN.{,1024}----/ wide ascii
         $pipe = /\\\\[a-zA-Z0-9_\-\\.\/:%]{2,}\\[a-zA-Z0-9_\-\\.\/:%]{,100}/ wide ascii nocase
         $ip = /([0-9]{1,3}\.){3}[0-9]{1,3}[\/0-9a-z.%\t]{1,}/ wide ascii nocase
+        $bazar = /[a-zA-Z0-9_\-]+.bazar/ wide ascii nocase
     condition:
         any of them
 }

@@ -7,12 +7,12 @@ unsupported_api: winfuncs.json #json file that maps apiname to argc to run unsup
 api_max: 100 #max times to log an api call before supressing further
 carve_pe: True
 dump_dir: False
-only_dump_matched: True
+dump_all: False # Dump all allocated memory regions even if they contained no new strings or yara matches
 
 monitor_writes: true #follow every memory allocation and dump if written to
 min_write: 10 #
 
 #When to scan a buffer for interesting strings or rule matches expressed as percent of buffer size
-scan_thresholds: [.5, .9, 2, 8]
+scan_thresholds: [.5, .9, 2, 8, 16, 24]
 
 monitor_execs: false #follow every memory allocation and dump if executed

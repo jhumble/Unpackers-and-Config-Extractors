@@ -7,6 +7,7 @@ import pefile
 import logging
 import yara
 import logging
+import numpy as np
 from hashlib import md5
 from time import time, sleep
 from multiprocessing import Pool, cpu_count
@@ -24,6 +25,12 @@ def rol(dword, i):
 def ror(dword, i):
     return rol(dword, 32-i)
 
+def xor(plaintext, key):
+    rtn = bytearray(len(plaintext))
+    for i in range(len(plaintext)):
+        rtn[i] = plaintext[i] ^ key[i%len(key)]
+    return rtn
+
 def get_section(path, section_name):
     with open(path, 'rb') as fp:
         data = fp.read()
@@ -36,7 +43,7 @@ def get_section(path, section_name):
     raise Exception(f'Failed to find section {section_name}')
 
 
-def nearest_fractions(a,b, max_fractions=10, window=10000, step=.1):
+def nearest_fractions(a,b, max_fractions=10, window=10000, step=.05):
     found = []
     for i in range(0, window):
         try:

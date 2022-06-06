@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-import json
-import hashlib
 import logging
 import traceback
 import os
@@ -9,7 +7,6 @@ import sys
 import pefile
 from binascii import hexlify, unhexlify
 from argparse import ArgumentParser
-from pprint import pprint
 from pathlib import Path
 
 repo_root = Path(os.path.realpath(__file__)).parent.parent.absolute()
@@ -24,6 +21,8 @@ def parse_args():
         help='Increase verbosity. Can specify multiple times for more verbose output')
     arg_parser.add_argument("-o", "--out", action="store", default=None,
       help="Path to dump unpacked file to")
+    arg_parser.add_argument("-s", "--strings", action="store_true", default=False,
+      help="print decrypted strings")
     arg_parser.add_argument('files', nargs='+')
     return arg_parser.parse_args()
 
@@ -39,11 +38,18 @@ class Unpacker:
         self.logger = logging.getLogger('JSSLoader Unpacker')
         self.path = None
         self.functions = {} # maps offset to length
+        self.strings = {}
 
     def to_va(self, addr):
-        return self.pe.get_rva_from_offset(addr)+self.pe.OPTIONAL_HEADER.ImageBase 
+        """
+            Mostly just used for debug printing virtual addresses to follow along in a debugger
+        """
+        rva = self.pe.get_rva_from_offset(addr)
+        if not rva:
+            raise Exception(f'Unable to get rva from addr 0x{addr:08X}')
+        return rva + self.pe.OPTIONAL_HEADER.ImageBase 
         
-    def unpack(self, path, output=None):
+    def unpack(self, path, output=None, print_strings=False):
         self.path = path
         with open(self.path, 'rb') as fp:
             self.data = fp.read()
@@ -53,56 +59,70 @@ class Unpacker:
         else:
             self.output = output
         
-        if not self.find_struct():
+        try:
+            self.functions = self.parse_functions()
+        except Exception as e:
+            self.logger.critical('Failed to parse encrypted function pointer list. Unable to continue')
             return False
-        self.functions = self.parse_functions()
         self.remove_xor_func()
         self.password = self.get_password()
         self.logger.info(f'xor passphrase: {hexlify(self.password)}')
-        self.unpack_functions()
+        self.decrypt_functions()
         self.replace_calls()
+
+        if print_strings:
+            self.decrypt_strings()
+            self.dump_strings()
+
         self.dump()
         
         
-    def find_struct(self):
+    def parse_functions(self):
         """
+            The entrypoint looks like this:
             00401000 | B9 00100000              | mov ecx,1000                                         |
             00401005 | 33C0                     | xor eax,eax                                          |
             00401007 | E8 18010000              | call birdwatch.401124                                |
+        
+            Immediately following the call instruction there is an array of words representing the
+            length of each encrypted function. We parse that array of lengths to build a list of function
+            pointers and sizes for later decryption.
         """
+        functions = {}
         regex = re.compile(br'[\xB8-\xBF]\x00\x10\x00\x00\x33\xC0\xE8....', re.DOTALL)
         match = regex.search(self.data)
         if not match:
-            self.logger.critical('Failed to find function length array. Unable to continue')
-            return None
+            raise Exception('Failed to find function length array. Unable to continue')
         #self.length_array = self.pe.get_rva_from_offset
-        self.length_array_raw = match.span()[1]
-        self.length_array_va = self.pe.get_rva_from_offset(self.length_array_raw)
-        self.logger.debug(f'function length array at raw offset 0x{self.length_array_raw:08X}')
-        self.logger.debug(f'function length array at VA 0x{self.length_array_va:08X}')
-        return True
+        fptr = match.span()[1]
+        lptr = fptr
+        self.logger.debug(f'function length array at raw offset 0x{fptr:08X}')
+        self.logger.debug(f'function length array at VA 0x{self.to_va(fptr):08X}')
 
-    def parse_functions(self):
-        functions = {}
-        fptr = self.length_array_raw
-        lptr = self.length_array_raw
         length = int.from_bytes(self.data[lptr:lptr+2], byteorder='little')
         idx = 1
         while length:
             fptr += length
             lptr += 2
-            self.logger.info(f'Function: 0x{fptr:08X}, Length: 0x{length:08X}')
+            self.logger.debug(f'Function: 0x{fptr:08X}, Length: 0x{length:08X}')
             length = int.from_bytes(self.data[lptr:lptr+2], byteorder='little')
             functions[fptr] = {'length': length, 'idx': idx}
             idx += 1 
-
         return functions
 
     def get_password(self):
-        addr = max(self.functions) + 0x152 #seems hard coded. May need to write a regex to extract the offset and size dynamically if future samples differ
-        return self.data[addr:addr+0x3E]
+        """ 
+            xor passphrase is located 0x152 bytes after the last function pointer.
+        """
+        addr = max(self.functions) + 0x152 #seems hard coded. May need to write a regex to extract the offset dynamically if future samples differ
+        password = self.data[addr:addr+0x7F].split(b'\x00')[0][:-4]
+        return password
         
-    def unpack_functions(self):
+    def decrypt_functions(self):
+        """ 
+            Now that we have a list of functions (self.functions) and the xor passphrase,
+            use that to replace each function with the decrypted equivalent
+        """
         data = bytearray(self.data)
         pw = bytearray(self.password)
         for addr, d in self.functions.items():
@@ -182,7 +202,10 @@ class Unpacker:
 
     def replace_calls(self):
         """
-            a few different ways of identifying the function responsible for decrypting, calling, and reencrypting functions
+            Find the "wrapper" function responsible for finding a target function, decrypting it, calling it, and reencrypting it. 
+            Once found, we identify all calls to that wrapper function and replace them with calls directly to the decrypted versions
+
+            a few different ways of identifying the function responsible for decrypting, calling, and reencrypting functions:
             00403EC1 | BA 28000000              | mov edx,28                                                                        | edx:EntryPoint, 28:'('
             00403EC6 | F7E2                     | mul edx                                                                           | edx:EntryPoint
         
@@ -208,7 +231,11 @@ class Unpacker:
         regex = re.compile(rb'(\x6A(?P<num>[\x01-\x7F])|\x68(?P<long_num>.\x00\x00\x00))\xE8(?P<offset>..(\xFF\xFF|\x00\x00))', re.DOTALL)
         for match in regex.finditer(self.data):
             offset = int.from_bytes(match.group('offset'), signed=True, byteorder='little')
-            self.logger.debug(f'Match end: 0x{self.to_va(match.span()[1]):08X} Offset: 0x{offset:08X}')
+            try:
+                va = self.to_va(match.span()[1])
+            except Exception as e:
+                self.logger.warning(f'Failed to patch 0x{match.start():08X}: {e}')
+                continue
             call_addr = match.span()[1] + offset
             if call_addr == decryption_func:
                 if match.group('num'):
@@ -216,12 +243,72 @@ class Unpacker:
                 else:
                     func_idx = int.from_bytes(match.group('long_num'), byteorder='little')
                 func_addr = self.get_func_by_idx(func_idx)
-                self.logger.debug(f'Found call to decryption function 0x{func_idx:02X} at 0x{self.to_va(match.start()):08X}. Replacing with call directly to 0x{self.to_va(func_addr):08X}')
+                self.logger.debug(f'Found wrapped call to function 0x{func_idx:02X} at 0x{self.to_va(match.start()):08X}. Replacing with call directly to 0x{self.to_va(func_addr):08X}')
                 new_offset = int.to_bytes(func_addr - (match.span()[1]), signed=True, length=4, byteorder='little')
                 if match.group('num'):
                     self.data = self.data[:match.start()] + b'\x90\x90\xE8' + new_offset + self.data[match.span()[1]:]
                 else:
                     self.data = self.data[:match.start()] + b'\x90\x90\x90\x90\x90\xE8' + new_offset + self.data[match.span()[1]:]
+
+
+    def decrypt_string(self, string):
+        """
+            The strings are decrypted by grabbing two bytes of ciphertext at time, swapping them, and subtracting 1 from
+            one byte and adding 1 to the other. Easier to show by example:
+            Ciphertext: "BCDE" -> "DAFC"
+        """
+        string = bytearray(string)
+        res = bytearray(len(string))
+        for i in range(0, len(string)-1,2):
+            res[i] = string[i+1]+1
+            res[i+1] = string[i]-1
+        if len(string)%2 == 1:
+            res[-1] = string[-1] - 2
+        return bytes(res)
+
+    def decrypt_strings(self):
+        """
+            Identify the following code block which contains a pointer to the first encrypted string (0x407A70 in this case)
+            The encrypted strings are just null separated and accessed by index
+            00404A38 | B9 707A4000                | mov ecx,bw3.407A70                      | 
+            00404A3D | EB 08                      | jmp bw3.404A47                          |
+            00404A3F | 8039 00                    | cmp byte ptr ds:[ecx],0                 |
+            00404A42 | 8D49 01                    | lea ecx,dword ptr ds:[ecx+1]            |
+            00404A45 | 75 F8                      | jne bw3.404A3F                          |
+            00404A47 | 4A                         | dec edx                                 |
+            00404A48 | 75 F5                      | jne bw3.404A3F                          |
+        """
+        regex = re.compile(rb'[\xB8-\xBF](?P<rva>..\x40\x00).{,16}[\x70-\x7F][\xD0-\xFC][\x48-\x4F][\x70-\x7F][\xD0-\xFC]', re.DOTALL)
+        match = regex.search(self.data)
+        if match:
+            va = int.from_bytes(match.group('rva'), byteorder='little')
+            self.logger.debug(f'match: {hexlify(match.group())} string table VA: 0x{va:08X}')
+            strings_addr = self.pe.get_offset_from_rva(int.from_bytes(match.group('rva'), byteorder='little') - self.pe.OPTIONAL_HEADER.ImageBase)
+            self.logger.info(f'Found encrypted string array at 0x{strings_addr:08X}')
+        else:
+            self.logger.error('Unable to find encrypted string table')
+
+        length = self.data[strings_addr:].find(b'\x00\x00')
+        idx = 1
+        for string in self.data[strings_addr:strings_addr+length].split(b'\x00'):
+            addr = self.data.find(string)
+            if len(string) > 1:
+                self.strings[idx] = {'value': string, 'addr': addr, 'decrypted': self.decrypt_string(string)}
+            idx += 1
+        # I'd like to go through and patch all of the calls that decrypt and load these strings to be direct references to them to ease analysis, but
+        # it seems like it will be quite a bit harder than the decrypt function patching, so I'll save that for a later exercise
+
+    def dump_strings(self):
+        print('Strings:')
+        print('Index    Decrypted String')
+        for idx, d in self.strings.items():
+            try:
+                print(f'{idx:02X}        {d["value"].decode():60} {d["decrypted"].decode()}')
+            except:
+                try:
+                    print(f'{idx:02X}        {hexlify(d["value"]):60} {d["decrypted"]}')
+                except:
+                    print(f'Failed to display string {idx:02X}')
 
         
 if __name__ == '__main__':
@@ -231,7 +318,7 @@ if __name__ == '__main__':
     for path in options.files:
         unpacker.logger.info(f'Processing {path}')
         try:
-            unpacker.unpack(path, output=options.out)
+            unpacker.unpack(path, output=options.out, print_strings=options.strings)
         except Exception as e:
             print(traceback.format_exc())
             

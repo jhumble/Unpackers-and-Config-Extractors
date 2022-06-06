@@ -55,8 +55,8 @@ class ConfigExtractor:
         with open(self.path, 'rb') as fp:
             self.data = fp.read()
         self.pe = pefile.PE(self.path, fast_load=False)
-        extractor.decrypt_strings()
-        extractor.extract_config()
+        self.decrypt_strings()
+        self.extract_config()
         
     def decrypt_strings(self):
         """
