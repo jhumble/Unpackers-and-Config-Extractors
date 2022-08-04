@@ -19,7 +19,6 @@ sys.path.append(lib)
 from utils import *
 
 sys.path.append(os.path.join(repo_root, 'speakeasy-unpacker'))
-print(os.path.join(repo_root, 'speakeasy-unpacker'))
 from unpack import Unpacker
 
 #import faulthandler
@@ -36,8 +35,7 @@ def parse_args():
     parser.add_argument("-T", "--timeout", help="timeout", default=None, type=int)
     parser.add_argument("-d", "--dump", dest='dump_dir', help="directory to dump memory regions and logs to", default=None)
     parser.add_argument("-E", "--export", help="If file is a dll run only dllmain and specified export, otherwise default to all exports", action='store', default=None)
-    parser.add_argument("-c", "--csv", help="append data about unpacked files to csv", action='store', default=None)
-    #parser.add_argument("-y", "--yara", help="Report new yara results from dumped files", default=False, action="store_true")
+    parser.add_argument("-c", "--csv", help="append data about unpacked files to csv and prevent processing files that already have results in it", action='store', default=None)
     parser.add_argument('-v', '--verbose', action='count', default=0, 
         help='Increase verbosity. Can specify multiple times for more verbose output')
     parser.add_argument('files', nargs='*')
@@ -66,7 +64,8 @@ def read_csv(path):
 
 
 class Block:
-    def __init__(self, rva, data, xor_key, sub_key, bits):
+    def __init__(self, rva, data, xor_key, sub_key, bits, ref):
+        self.ref = ref
         self.rva = rva
         self.data = data
         self.xor_key = xor_key
@@ -74,6 +73,7 @@ class Block:
         self.bits = bits
         self.plaintext = None
         self.decrypt()
+
 
     def decrypt(self):
         self.plaintext = bytearray(len(self.data))
@@ -89,18 +89,19 @@ class Block:
         self.plaintext = bytearray([int(bits[i:i+8],2) for i in range(0,len(bits),8)])
 
     def __repr__(self):
-        return f'RVA: 0x{self.rva:08X}, size: 0x{len(self.data):08X}, xor key: 0x{self.xor_key:02X}, sub key: 0x{self.sub_key:02X}, bits: {self.bits}, ciphertext: {hexlify(self.data[:8])}... plaintext: {hexlify(self.plaintext[:8])}...'
+        return f'RVA: 0x{self.rva:08X}, size: 0x{len(self.data):08X}, xor key: 0x{self.xor_key:02X}, sub key: 0x{self.sub_key:02X}, bits: {self.bits}, ciphertext: {hexlify(self.data[:8])}... plaintext: {hexlify(self.plaintext[:8])}... Referenced at: 0x{self.ref:08X}'
         
     def __str__(self):
         return self.__repr__()
                 
-class BumbleBeeUnpacker(Unpacker):
+class ForestUnpacker(Unpacker):
     
     def __init__(self, path, config_path, **kwargs):
-        super(BumbleBeeUnpacker, self).__init__(path, config_path, **kwargs)
+        super(ForestUnpacker, self).__init__(path, config_path, **kwargs)
         self.blocks = []
         self.carved_pes = []
         self.functions = {}
+        self.strings = None
         self.md5 = hashlib.md5(self.data).hexdigest()
         self.logger = logging.getLogger(f'Unpacker.{self.md5}')
         if not self.set_export():
@@ -160,7 +161,8 @@ class BumbleBeeUnpacker(Unpacker):
         self.emu.max_api_count = 10**6
         self.emu.api_counts = {}
         self.emu.api_log_max = 100
- 
+        print(f'[*]\tEmulating for {self.timeout} seconds...')
+
         try:
             #DllMain should be called first
             try:
@@ -253,7 +255,8 @@ class BumbleBeeUnpacker(Unpacker):
         for pe in self.carved_pes:
             md5 = hashlib.md5(pe['data']).hexdigest()
             path = os.path.join(self.dump_dir, f'{md5}_{pe["offset"]:X}-{pe["offset"]+len(pe["data"]):X}.{pe["ext"]}')
-            self.logger.info(f'[!]\tDumping carved PE file to {path}')
+            self.logger.info(f'Dumping carved PE file to {path}')
+            print(f'[!]\tDumping carved PE file to {path}')
             found_pe = True
             with open(path, 'wb') as fp:
                 fp.write(pe["data"])
@@ -269,6 +272,12 @@ class BumbleBeeUnpacker(Unpacker):
         self.key, self.lzw_width = self.get_key_and_width(self.blocks[0].plaintext)
         
         payload = lzw_decompress(xor(ct, self.key), self.lzw_width)
+        if payload:
+            print('[*]\tUnpacking successful. Block info:')
+            for block in self.blocks:
+                print(f'\t{block}')
+            print(f'[*]\tFinal key: {hexlify(self.key)}')
+            print(f'[*]\tLZW width: {self.lzw_width}')
         
         self.dump(payload)
         
@@ -299,7 +308,7 @@ class BumbleBeeUnpacker(Unpacker):
                     #res = b''.join(lzw.decompress(decrypted, width))
                     res = lzw_decompress(decrypted, width)
                     if res.startswith(b'MZ') and b"This program cannot be run" in res and len(res) < 5*1024**2:
-                        self.logger.debug(f'Successfully decompressed with bit width 0x{width:02X}')
+                        self.logger.info(f'Successfully decompressed with bit width 0x{width:02X} and xor key {hexlify(key)}')
                         return key, width
                 except Exception as e:
                     import traceback
@@ -338,12 +347,12 @@ class BumbleBeeUnpacker(Unpacker):
             #self.logger.critical(f'size: 0x{size:X}, bits: {bits}, xor_key: 0x{xor_key:X}, sub_key: {sub_key:X}, ct_rva: 0x{offset:08X}') 
             #self.logger.critical(f'0x{self.pe.OPTIONAL_HEADER.ImageBase:X}-0x{self.pe.OPTIONAL_HEADER.ImageBase + self.pe.OPTIONAL_HEADER.SizeOfImage:X}')
             if offset > self.pe.OPTIONAL_HEADER.ImageBase and offset < self.pe.OPTIONAL_HEADER.ImageBase + self.pe.OPTIONAL_HEADER.SizeOfImage and \
-            bits >= 1 and bits <= 8 and size < 0x1000000 and size >= 0x100:
+            bits >= 1 and bits <= 8 and size < 0x1000000 and size >= 0xF0:
                 as_hex = [f'0x{arg:X}' for arg in args]
                 #self.logger.critical(as_hex)
                 return size, bits, xor_key, sub_key, offset
         as_hex = [f'0x{arg:X}' for arg in args]
-        raise Exception(f'Unable to decrypt_block args from: {as_hex}')
+        raise Exception(f'Unable to parse out args to decrypt_block from: {as_hex}')
 
 
     def decrypt_block_cb(self, **kwargs):
@@ -366,8 +375,8 @@ class BumbleBeeUnpacker(Unpacker):
             return
         
         ret = emu.get_ret_address()
-        block = Block(ct_rva, data, xor_key, sub_key, bits)
-        self.logger.info(f'BLOCK: {block}, called from 0x{ret:08X}')
+        block = Block(ct_rva, data, xor_key, sub_key, bits, ret)
+        self.logger.info(f'Found block: {block}, called from 0x{ret:08X}')
         self.blocks.append(block)
 
         #self.logger.critical(f'decrypt_block called. args: {argv}, ret: {ret}')
@@ -429,6 +438,7 @@ class BumbleBeeUnpacker(Unpacker):
             
 
     def PATCH_BUMBLEBEE(self):
+        print('[*]\tApplying patches...')
         self.find_all_functions()
 
         if self.arch == e_arch.ARCH_X86:
@@ -686,7 +696,7 @@ class BumbleBeeUnpacker(Unpacker):
             00007FFEA73F2341 | 48:F7F1                            | div rcx                                                     |
             ...
             00007FFEA73F235D | 49:63C1                            | movsxd rax,r9d                                              |
-            00007FFEA73F2360 | 48:3BC1                            | cmp rax,rcx                                                 | NOT GETTING PATCHED?
+            00007FFEA73F2360 | 48:3BC1                            | cmp rax,rcx                                                 |
             00007FFEA73F2363 | 0F82 04FFFFFF                      | jb bdc4a82bda16e5c8617ab3004da2acd3.7FFEA73F226D            |
         """
         regex = br'[\x40-\x4F]\x32[\x04\x0C\x14\x1C\x24\x2C\x34\x3C][\x00-\x3C].{,128}?'
@@ -726,17 +736,6 @@ class BumbleBeeUnpacker(Unpacker):
 if __name__ == "__main__":
     options = parse_args()
     configure_logger(options.verbose)
-
-    """
-    import signal
-    crashed = False
-    def sig_handler(signum, frame):
-        global unpacker
-        print('sigsegv :|')
-        unpacker.extract_payload()
-
-    signal.signal(signal.SIGSEGV, sig_handler)
-    """
     already_read = read_csv(options.csv)
 
     for arg in options.files:
@@ -748,7 +747,7 @@ if __name__ == "__main__":
                 print(f'Skipping {path}. Already processed previously')
                 continue
 
-            unpacker = BumbleBeeUnpacker(path=path, config_path=options.config, **vars(options))
+            unpacker = ForestUnpacker(path=path, config_path=options.config, **vars(options))
             try:
                 unpacker.run()
                 unpacker.extract_payload()
