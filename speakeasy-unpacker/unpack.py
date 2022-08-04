@@ -13,7 +13,6 @@ import sys
 import re
 from capstone import *
 from pathlib import Path
-from func_timeout import func_timeout, FunctionTimedOut
 from speakeasy.winenv.api import api
 import speakeasy.winenv.defs.windows.windows as windefs
 import speakeasy.common as common
