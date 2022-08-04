@@ -1,6 +1,7 @@
 import sys
 import os
 import fractions
+import datetime
 import re
 import struct
 import pefile
@@ -18,6 +19,12 @@ def configure_logger(log_level):
     log_level = min(max(log_level, 0), 3) #clamp to 0-3 inclusive
     logging.basicConfig(level=log_levels[log_level], 
             format='%(asctime)s - %(name)s - %(levelname)-8s %(message)s')
+
+def get_compile_time(pe):
+    ts = int(pe.FILE_HEADER.dump_dict()['TimeDateStamp']['Value'].split()[0], 16)
+    utc_time = datetime.datetime.utcfromtimestamp(ts)
+    t_delta = (datetime.datetime.today() - utc_time).days
+    return utc_time.strftime(f"%Y-%m-%dT%H:%M:%S")
 
 def rol(dword, i):
     return ((dword << i) & 0xffffffff) | (dword >> (32-i) ) 
@@ -108,10 +115,10 @@ def recursive_all_files(directory, ext_filter=None):
             ret.append(f)
     return ret
 
-def carve(buf):
+def carve(buf, match_at_start=False):
     found = []
     for i in [match.start() for match in re.finditer(b'MZ', buf)]:
-        if i == 0: # Ignore matches at offset 0 (regular PE files)
+        if i == 0 and not match_at_start: # Ignore matches at offset 0 (regular PE files)
             continue
         try:
             pe = pefile.PE(data=buf[i:])
@@ -298,3 +305,42 @@ def dump_regs(emu):
     dump_regs.regs = regs
 
     return rtn
+
+#filter yara matches according to filters defined in metadata
+def filter_matches(matches, fname):
+    return [match for match in matches if not filter_match(match, fname)]
+
+def filter_match(match, fname):
+    for key in ['file_name', 'full_path']:
+        if key in match.meta:
+            passed = False         
+            for search in match.meta[key].lower().split(','):
+                negate = False
+                if search.startswith('!'):
+                    search = search[1:]
+                    negate = True
+                if 'sub:' in search:
+                    ns = search.replace('sub:', '')
+                    if ns in fname.lower() and not negate or (not ns in fname.lower() and negate):
+                        passed = True
+                else:
+                    if search == fname.lower() and not negate or (search != fname.lower() and negate):
+                        passed = True
+            if not passed:
+                #print(f'meta filtered {fname} on {key}')
+                return True
+
+    if 'file_ext' in match.meta:
+        passed = False
+        for search in match.meta['file_ext'].lower().split(','):
+            negate = False
+            if search.startswith('!'):
+                search = search[1:]
+                negate = True
+            if fname.lower().endswith(search) and not negate or (not fname.lower().endswith(search) and negate):
+                passed = True
+        if not passed:
+            #print(f'meta filtered {fname} on file_ext')
+            return True
+        
+    return False
