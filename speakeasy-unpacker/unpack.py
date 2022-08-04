@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-
 import yaml
 import json
 import types
@@ -116,7 +115,7 @@ def handle_import_func(self, dll, name):
             if hook.call_conv is None:
                 hook.call_conv = e_arch.CALL_CONV_STDCALL
 
-            argv = self.get_func_argv(hook.call_conv, hook.argc)
+            argv = self.get_func_urgv(hook.call_conv, hook.argc)
             self.hammer.handle_import_func(imp_api, hook.call_conv, hook.argc)
             rv = hook.cb(self, imp_api, None, argv)
             ret = self.get_ret_address()
@@ -153,7 +152,7 @@ def handle_import_func(self, dll, name):
         self.on_run_complete()
 
 class MonitoredSection:
-    def __init__(self, section_type, start, size, scan_thresholds=[]):
+    def __init__(self, section_type, start, size, scan_thresholds=[], cb=None):
         self.section_type = section_type
         self.start = start
         self.size = size
@@ -163,9 +162,14 @@ class MonitoredSection:
         self.dump = False
         self.strings = []
         self.yara_matches = []
+        self.cb = cb
 
     def __repr__(self):
-        return 'MonitoredSection: Type: {}, range: 0x{:08X}-0x{:08X} Bytes Written: 0x{:08X}'.format(self.section_type, self.start, self.start+self.size, self.written)
+        rtn = 'MonitoredSection: Type: {}, range: 0x{:08X}-0x{:08X} Bytes Written: 0x{:08X}'.format(self.section_type, self.start, self.start+self.size, self.written)
+        if self.cb:
+            rtn += f' Callback: {self.cb}'
+        return rtn
+        
     def __str__(self):
         return self.__repr__()
     
@@ -186,15 +190,15 @@ class Unpacker(speakeasy.Speakeasy):
 
         self.logger = logging.getLogger('Unpacker')
         self.code_hook_active = False
+        self.breakpoints = {}
 
         with open(self.path, 'rb') as fp:
-            data = fp.read()
+            self.data = fp.read()
 
-        #for prepatching bumblebee busyloop. Definitely need to find a better way to insert this sort of logic
-        self.patch()
+        #self.apply_patches()
 
         try:
-            self.pe = pefile.PE(data=data)
+            self.pe = pefile.PE(data=self.data)
         except Exception as e:
             self.logger.info(f'{self.path} is not a PE file, assuming shellcode')
             self.pe = None
@@ -219,7 +223,7 @@ class Unpacker(speakeasy.Speakeasy):
 
         if self.yara_dir:
             self.yara_rules = build_rules(self.yara_dir)
-            self.initial_matches = set([match.rule for match in self.yara_rules.match(data=data)])
+            self.initial_matches = set([match.rule for match in self.yara_rules.match(data=self.data)])
             self.logger.info(f'Initial yara matches: {self.initial_matches}')
             self.new_matches = []
         else:
@@ -235,7 +239,7 @@ class Unpacker(speakeasy.Speakeasy):
                 self.logger.error(f'Failed to locate strings.yar. Looked in {candidates}')
                 self.strings = False
             else:
-                matches = self.strings_rule.match(data=data)
+                matches = self.strings_rule.match(data=self.data)
                 self.initial_strings = self.parse_string_matches(matches)
                 self.dynamic_strings = []
             
@@ -249,37 +253,41 @@ class Unpacker(speakeasy.Speakeasy):
         if self.trace:
             self.start_trace()
 
-    def patch(self):
+    def add_breakpoint(self, bp, cb=None):
+        self.logger.info(f'Setting breakpoint on 0x{bp:016X} with callback: {cb}')
+        self.watch_execs(bp, 1, cb)
+
+    def apply_patches(self):
+        # Speakeasy handles the file by path, so if we are patching it is easiest to just 
+        # apply the patches, write the patched file to /tmp and update self.path
         from tempfile import mkstemp
-        _, temppath = mkstemp()
-        with open(self.path, 'rb') as fp:
-            data = fp.read() 
-        #busyloop = re.compile(rb'\x99\x41?\xF7[\x78-\x7F\xB8-\xBF\xF8-\xFF].{,48}\x99\x41?\xF7[\x78-\x7F\xB8-\xBF\xF8-\xFF].{,192}\x3B.{,8}\x0F\x8C....', re.DOTALL)
-        busyloop = re.compile(rb'(\x48\x8B[\xC4\xCC\xD4\xDC\xEC\xF4\xFC]|\x48\x89[\x44\x4C\x54\x5C\x6C\x74\x7C]\x24[\x08\x10\x18\x20\x28\x30]).{,2000}?\x99\x41?\xF7[\x78-\x7F\xB8-\xBF\xF8-\xFF].{,64}\x99\x41?\xF7[\x78-\x7F\xB8-\xBF\xF8-\xFF]', re.DOTALL)
-        """
-        00007FFCB4D808B3 | 45:3B8D A0060000         | cmp r9d,dword ptr ds:[r13+6A0]                                                           | r13+6A0:"h9W"
-        00007FFCB4D808BA | 0F8C 4DFEFFFF            | jl 365cd47be647a89c679eb9effed479d147e16fed036e7a932599a6afd58352e6_p31.7FFCB4D8070D     |
-        """
-        busyloop = re.compile(rb'\x99\x41?\xF7[\x78-\x7F\xB8-\xBF\xF8-\xFF].{,64}\x99\x41?\xF7[\x78-\x7F\xB8-\xBF\xF8-\xFF].{,512}?\x45\x3B[\x88-\x8F].{,8}\x0F\x8C....', re.DOTALL)
-        min_size = 10**9
-        smallest_match = None
-        for match in busyloop.finditer(data):
-            if len(match.group()) < min_size:
-                min_size = len(match.group())
-                smallest_match = match
-        #if smallest_match:
-            #patch_loc = match.start()
-            patched = re.sub(rb'\x0F\x8C....', b'\x90'*6, data[match.start():match.end()])
-            #patch_loc = match.start()+len(match.group()) - 6
-            #self.logger.info(f'Patching conditional jump at 0x{patch_loc:08X} from {hexlify(data[patch_loc-8:patch_loc+8])} to RET')
-            self.logger.info(f'Patching conditional jump at 0x{match.start():08X} from {hexlify(data[match.start():match.end()])} to {hexlify(patched)}')
-            with open(temppath, 'wb') as fp:
-                #fp.write(data[:patch_loc] + b'\x90'*6 + data[patch_loc+6:])
-                fp.write(data[:match.start()] + patched + data[match.end():])
-            self.path = temppath
-            return 
-        else:
-            self.logger.error('Failed to find patch location for Bumblebee Crypter')
+        handle, temppath = mkstemp()
+        os.close(handle)
+        self.logger.debug('Applying patches...')
+
+        patches = {}
+        for name in dir(self):
+            method = getattr(self, name)
+            if callable(method) and 'PATCH_' in name:
+                patches[name] = method
+
+        if not patches:
+            return
+
+        # Find every patch method (Starting with PATCH_)
+        self.logger.debug(f'Applying {len(patches)} patches...')
+        for name, method in patches.items():
+            try:
+                self.logger.info(f'Applying patch {name}')
+                method()
+            except Exception as e:
+                self.logger.error(f'Failed to apply patch {name}: {e}\n{traceback.format_exc()}')
+        
+        with open(temppath, 'wb') as fp:
+            self.logger.info(f'Saving patched file to {temppath}')
+            fp.write(self.data)
+        self.path = temppath
+        return 
 
 
     def disasm(self, address: int, size: int):
@@ -305,7 +313,6 @@ class Unpacker(speakeasy.Speakeasy):
             Precedence: CLI > config > defaults
         """
         candidates = [os.path.join(os.getcwd(), 'config.yml'), os.path.join(os.path.join(sys.path[0], 'config.yml'))]
-        print(candidates)
         if config_path:
             candidates = [config_path]
         for candidate in candidates:
@@ -334,11 +341,11 @@ class Unpacker(speakeasy.Speakeasy):
         DEFAULTS = {'yara_dir': None, 'trace': False, 'trace_regs': False, 'arch': arch_default,
                     'timeout': 30, 'unsupported_api': None, 'api_max': 100, 'carve_pe': True, 'speakeasy_config': None,
                     'monitor_writes': True, 'min_write': 10, 'monitor_execs': False, 'dump_dir': '/tmp',
-                    'export': None, 'scan_thresholds': [], 'strings': True, 'dump_all': False, 'breakpoint': []}
+                    'export': None, 'scan_thresholds': [], 'strings': True, 'dump_all': False, 'breakpoint': [], 'offset': 0, 'command_line': None}
 
         for key, default in DEFAULTS.items():
             if not (kwargs.get(key, None) or key in self.unpacker_config):
-                self.logger.warning(f'{key} not defined in {self.unpacker_config_file} and not provided via args. Defaulting to {default}')
+                self.logger.debug(f'{key} not defined in {self.unpacker_config_file} and not provided via args. Defaulting to {default}')
                 setattr(self, key, default)
             elif kwargs.get(key, None):
                 self.logger.debug(f'self.{key} = {kwargs[key]} from CLI')
@@ -393,6 +400,7 @@ class Unpacker(speakeasy.Speakeasy):
         if not self.tracing:
             self.tracing = True
             self.add_code_hook(self.trace_cb)
+            self.code_hook_active = True
 
     def trace_cb(self, emu, address, size, ctx):
 
@@ -454,7 +462,6 @@ class Unpacker(speakeasy.Speakeasy):
 
 
     def dump_section(self, section, addr=None):
-
         data = self.scan(section)
 
         found_pe = False
@@ -497,11 +504,17 @@ class Unpacker(speakeasy.Speakeasy):
         for addr, section in self.exec_sections.items():
             try:
                 if address >= section.start and address <= section.end:
-                    self.logger.info('Caught execution in monitored memory section 0x%X-0x%X. Current Instruction: %s' % 
+                    self.logger.debug('Caught execution in monitored memory section 0x%X-0x%X. Current Instruction: %s' % 
                         (section.start, section.end, self.disasm(address, size)))
+                    self.logger.debug(section)
                     if self.dump_dir:
                         self.dump_section(section, address)
-                    free.append(addr)
+
+                    if section.cb:
+                        self.logger.debug(f'Calling bp callback {section.cb}')
+                        section.cb(emu=emu, address=address, size=size, ctx=ctx) 
+                    else:
+                        free.append(addr)
             except Exception as e:
                 self.logger.info(traceback.format_exc())
                 exit()
@@ -523,7 +536,7 @@ class Unpacker(speakeasy.Speakeasy):
                     surpassed = [x for x in section.scan_thresholds if x <= progress]
                     section.scan_thresholds = list(set(section.scan_thresholds) - set(surpassed))
                     if surpassed:
-                        self.logger.debug(f'{section} {progress*100}% written. Passed scan thesholds: {surpassed}. Scanning...')
+                        self.logger.debug(f'{section} {progress*100:2.1f}% written. Passed scan thesholds: {surpassed}. Scanning...')
                         self.scan(section)
             except Exception as e:
                 self.logger.error(traceback.format_exc())
@@ -535,17 +548,20 @@ class Unpacker(speakeasy.Speakeasy):
         self.write_sections[addr] = section
         self.add_mem_write_hook(self.monitor_section_write, begin=section.start, end=section.end)
 
-    def watch_execs(self, addr, size):
+    def watch_execs(self, addr, size=1, cb=None):
         self.logger.debug('Watching 0x{:08X}-0x{:08X} for Exec'.format(addr, addr+size))
-        section = MonitoredSection('execution', addr, size, self.scan_thresholds)
+        section = MonitoredSection('execution', addr, size, self.scan_thresholds, cb=cb)
         self.exec_sections[addr] = section
         if not self.code_hook_active:
             self.add_code_hook(self.monitor_section_execute)
+            self.code_hook_active = True
 
         
     # Emulate the binary from begin until @end, with timeout in @timeout and
     # number of emulated instructions in @count
     def run(self, begin=None, end=None, timeout=0, count=0):
+        self.apply_patches()
+
         if self.pe:
             module = self.load_module(self.path)
         else:
@@ -566,8 +582,8 @@ class Unpacker(speakeasy.Speakeasy):
         #Hook api function handler
         self.emu.handle_import_func = types.MethodType(handle_import_func, self.emu)
         for bp in self.breakpoint:
-            self.logger.info(f'Setting exec watch on 0x{bp:016X}')
-            self.watch_execs(bp, 1)
+            self.add_breakpoint(bp)
+
         try:
             if self.pe and self.pe.is_dll():
                 #DllMain should be called first
@@ -579,6 +595,12 @@ class Unpacker(speakeasy.Speakeasy):
                     self.logger.warning(traceback.format_exc())
                 # Set up some args for the export
                 args = [0,1,0,0,0,0,0,0]
+                arg = b'1198576'
+                mem = self.emu.mem_map(len(arg)+1, tag='export', perms=common.PERM_MEM_RW)
+                self.emu.mem_write(mem, arg)
+                #print(dir(module))
+                args = [2, module.base, mem]
+                self.logger.critical(f'Args: {[f"{arg:08X}" for arg in args]}') 
                 if self.export:
                     exports = [exp for exp in module.get_exports() if exp.name == self.export]
                 else:
@@ -601,7 +623,7 @@ class Unpacker(speakeasy.Speakeasy):
                 # get size of shellcode rounded up to nearest 0x1000 bytes
                 size = ((os.stat(self.path).st_size - 1) // 0x1000) + 0x1000
                 self.watch_writes(sc_addr, size)
-                self.run_shellcode(sc_addr, offset=0)
+                self.run_shellcode(sc_addr, offset=self.offset)
 
         except Exception as e:
             self.logger.error('Program Crashed: {}'.format(e))
@@ -617,6 +639,7 @@ def parse_args():
     parser.add_argument("-r", "--reg", dest='trace_regs', help="Dump register values with trace option", action='store_true', default=False)
     parser.add_argument("-t", "--trace", help="Enable full trace", action='store_true', default=False)
     parser.add_argument("-T", "--timeout", help="timeout", default=None, type=int)
+    parser.add_argument("-o", "--offset", help="offset to begin execution when running shellcode", default=0, type=int)
     parser.add_argument("-b", "--breakpoint", help="breakpoint", default=[], nargs='*', type=str)
     parser.add_argument("-d", "--dump", dest='dump_dir', help="directory to dump memory regions and logs to", default=None)
     parser.add_argument("-e", "--monitor-dumps", dest='monitor_execs', help="dump dynamically allocated sections if code is executed from them", action='store_true', default=False)
@@ -626,6 +649,7 @@ def parse_args():
     parser.add_argument("-y", "--yara", help="Report new yara results from dumped files", default=False, action="store_true")
     parser.add_argument("-c", "--carve", dest='carve_pe', help="Attempt to carve PE files from dumped sections", default=False, action="store_true")
     parser.add_argument("-a", "--arch", help="If input is shellcode, define architechture x86 or x64", default=None, action="store")
+    parser.add_argument("-A", "--command_line", help="program args", default=None, action="store")
     parser.add_argument("-D", "--dump-matched", dest="dump_all", help="Only dump memory sections containing new strings or yara matches", default=False, action="store_true")
     parser.add_argument('-v', '--verbose', action='count', default=0, 
         help='Increase verbosity. Can specify multiple times for more verbose output')
@@ -636,7 +660,7 @@ def parse_args():
 if __name__ == "__main__":
     options = parse_args()
     # Auto parse breakpoint args as hex/dec
-    print(options.breakpoint)
+    #print(options.breakpoint)
     options.breakpoint = [int(x,0) for x in options.breakpoint]
 
     configure_logger(options.verbose)
