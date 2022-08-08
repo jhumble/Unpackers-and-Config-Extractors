@@ -269,9 +269,14 @@ class ForestUnpacker(Unpacker):
             self.logger.debug(block)
             ct += block.plaintext
 
+
         self.key, self.lzw_width = self.get_key_and_width(self.blocks[0].plaintext)
         
-        payload = lzw_decompress(xor(ct, self.key), self.lzw_width)
+        #payload = lzw_decompress(xor(ct, self.key), self.lzw_width)
+        x = xor(ct, self.key)
+        with open(os.path.join(self.dump_dir, f'decrypted.lzw'), 'wb') as fp:
+            fp.write(x)
+        payload = lzw_decompress(x, self.lzw_width)
         if payload:
             print('[*]\tUnpacking successful. Block info:')
             for block in self.blocks:
@@ -282,9 +287,9 @@ class ForestUnpacker(Unpacker):
         self.dump(payload)
         
         
-
     def get_key_and_width(self, data, min_bits=18, max_bits=24):
         #map lzw bits to compressed LZW blob
+        self.logger.debug(f'Find key for ciphertext {hexlify(data[:0x40])}')
         known_plaintexts =  {
                                 16: [unhexlify('004D005A0090000000030000010500040105000000FF00FF010500B80108010E0040010E01110112011301140111001800010105000E001F00BA000E000000B4')],
                                 18:[unhexlify('00134005A0024000000000C0000004140004004140000003FC00FF0041400B800420010E00100010E0044401120044C011400444002800004010500038001F00'),unhexlify('00134005A0024000000000C0000004140004004140000003FC00FF0041400B800420010E00100010E0044401120044C011400444002000004010500038001F00'),unhexlify('00134005A0024000000000C0000004140004004140000003FC00FF0041400B800420010E00100010E0044401120044C011400444002800004010500038001F00'),unhexlify('00134005A0024000000000C0000004140004004140000003FC00FF0041400B800420010E00100010E0044401120044C011400444001800004010500038001F00')],
@@ -301,13 +306,22 @@ class ForestUnpacker(Unpacker):
         for width, known_list in known_plaintexts.items():
             for known in known_list:
                 key = xor(known, data[:len(known)])
+                self.logger.debug(f'{hexlify(known)} ^ {hexlify(data[:len(known)])} = {hexlify(key)}')
                 self.logger.debug(f'Potential key associated with {width} bit LZW EXE: {hexlify(key)}')
                 decrypted = xor(data, key)
+
                 try:
                     self.logger.debug(f'Attempt LZW decompression with 0x{width:02X} bit width')
                     #res = b''.join(lzw.decompress(decrypted, width))
                     res = lzw_decompress(decrypted, width)
                     if res.startswith(b'MZ') and b"This program cannot be run" in res and len(res) < 5*1024**2:
+                        try:
+                            pe = pefile.PE(data=res)
+                            info = pe.dump_info()
+                        except Exception as e:
+                            #various issues with the PE files will cause dump_info to raise an exception, move on if that happens
+                            self.logger.debug(f'Failed to parse resulting PE with pefile: {e}')
+                            continue
                         self.logger.info(f'Successfully decompressed with bit width 0x{width:02X} and xor key {hexlify(key)}')
                         return key, width
                 except Exception as e:

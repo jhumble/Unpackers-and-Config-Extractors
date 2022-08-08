@@ -317,9 +317,11 @@ class BitUnpacker(object):
 
                 codesize = codesize + 1
 
-                # is this too late?
-                while codesize >= (2 ** pointwidth):
-                    pointwidth = pointwidth + 1
+                # We need a fixed width, no increasing
+                #while codesize >= (2 ** pointwidth):
+                #    pointwidth = pointwidth + 1
+                #    print(f'Increased pointsize to {pointwidth}')
+                #    exit()
 
 
 
