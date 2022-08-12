@@ -7,6 +7,8 @@ import argparse
 import traceback
 import csv 
 
+from multiprocessing import Pool, Lock
+from itertools import repeat
 from pathlib import Path
 from types import MethodType
 from binascii import hexlify, unhexlify
@@ -23,7 +25,7 @@ from unpack import Unpacker
 
 #import faulthandler
 #faulthandler.enable()
-
+write_lock = Lock()
 
 def parse_args():
     usage = "unpack.py [OPTION]... [FILES]..."
@@ -33,6 +35,7 @@ def parse_args():
     parser.add_argument("-r", "--reg", dest='trace_regs', help="Dump register values with trace option", action='store_true', default=False)
     parser.add_argument("-t", "--trace", help="Enable full trace", action='store_true', default=False)
     parser.add_argument("-T", "--timeout", help="timeout", default=None, type=int)
+    parser.add_argument("-p", "--processes", help="processes", default=1, type=int)
     parser.add_argument("-d", "--dump", dest='dump_dir', help="directory to dump memory regions and logs to", default=None)
     parser.add_argument("-E", "--export", help="If file is a dll run only dllmain and specified export, otherwise default to all exports", action='store', default=None)
     parser.add_argument("-c", "--csv", help="append data about unpacked files to csv and prevent processing files that already have results in it", action='store', default=None)
@@ -161,7 +164,7 @@ class ForestUnpacker(Unpacker):
         self.emu.max_api_count = 10**6
         self.emu.api_counts = {}
         self.emu.api_log_max = 100
-        print(f'[*]\tEmulating for {self.timeout} seconds...')
+        print(f'[*]\tEmulating {self.md5} for {self.timeout} seconds...')
 
         try:
             #DllMain should be called first
@@ -196,7 +199,6 @@ class ForestUnpacker(Unpacker):
 
 
     def write_csv(self, path):
-
         if not path:
             return
         block_info = [str(block) for block in self.blocks]
@@ -256,7 +258,7 @@ class ForestUnpacker(Unpacker):
             md5 = hashlib.md5(pe['data']).hexdigest()
             path = os.path.join(self.dump_dir, f'{md5}_{pe["offset"]:X}-{pe["offset"]+len(pe["data"]):X}.{pe["ext"]}')
             self.logger.info(f'Dumping carved PE file to {path}')
-            print(f'[!]\tDumping carved PE file to {path}')
+            print(f'[!]\tDumping carved PE file from {self.md5} to {path}')
             found_pe = True
             with open(path, 'wb') as fp:
                 fp.write(pe["data"])
@@ -278,11 +280,11 @@ class ForestUnpacker(Unpacker):
             fp.write(x)
         payload = lzw_decompress(x, self.lzw_width)
         if payload:
-            print('[*]\tUnpacking successful. Block info:')
+            print(f'[*]\tUnpacking {self.md5} successful. Block info:')
             for block in self.blocks:
                 print(f'\t{block}')
-            print(f'[*]\tFinal key: {hexlify(self.key)}')
-            print(f'[*]\tLZW width: {self.lzw_width}')
+            print(f'[*]\tFinal key for {self.md5}: {hexlify(self.key)}')
+            print(f'[*]\tLZW width for {self.md5}: {self.lzw_width}')
         
         self.dump(payload)
         
@@ -452,7 +454,7 @@ class ForestUnpacker(Unpacker):
             
 
     def PATCH_BUMBLEBEE(self):
-        print('[*]\tApplying patches...')
+        print(f'[*]\tApplying patches to {self.md5}...')
         self.find_all_functions()
 
         if self.arch == e_arch.ARCH_X86:
@@ -746,26 +748,38 @@ class ForestUnpacker(Unpacker):
         return regexes
 
 
+def process_file(path, options, already_read):
+    #TODO Fix. Shouldn't read/hash twice 
+    with open(path, 'rb') as fp:
+        md5 = hashlib.md5(fp.read()).hexdigest()
+    if md5 in already_read:
+        print(f'Skipping {path}. Already processed previously')
+        return 
+
+    unpacker = ForestUnpacker(path=path, config_path=options.config, **vars(options))
+    try:
+        unpacker.run()
+        unpacker.extract_payload()
+        with write_lock:
+            unpacker.write_csv(options.csv)
+    except Exception as e:
+        unpacker.logger.error(f'Exception emulating {path}:{e}\n{traceback.format_exc()}')
+
 
 if __name__ == "__main__":
     options = parse_args()
     configure_logger(options.verbose)
     already_read = read_csv(options.csv)
 
+    all_files = []
     for arg in options.files:
         for path in recursive_all_files(arg):
-            #TODO Fix. Shouldn't read/hash twice 
-            with open(path, 'rb') as fp:
-                md5 = hashlib.md5(fp.read()).hexdigest()
-            if md5 in already_read:
-                print(f'Skipping {path}. Already processed previously')
-                continue
+            all_files.append(path)
 
-            unpacker = ForestUnpacker(path=path, config_path=options.config, **vars(options))
-            try:
-                unpacker.run()
-                unpacker.extract_payload()
-                unpacker.write_csv(options.csv)
-            except Exception as e:
-                unpacker.logger.error(f'Exception emulating {path}:{e}\n{traceback.format_exc()}')
-                            
+    if options.processes > 1:
+        with Pool(options.processes) as pool:
+            pool.starmap(process_file, zip(all_files, repeat(options), repeat(already_read)))
+    else:
+        for path in all_files:
+            process_file(path, options, already_read)
+
