@@ -1,8 +1,8 @@
 #yara directory of rules for extracting interesting strings
-yara_dir: /Users/jhumble/yara-rules
+yara_dir: /Users/jhumble/ice-53-yara-rules
 trace: false # output every assembly instruction
 trace_regs: false # output registers with every assembly instruction
-timeout: 30
+timeout: 60
 unsupported_api: winfuncs.json #json file that maps apiname to argc to run unsupported api functions
 api_max: 100 #max times to log an api call before supressing further
 carve_pe: True
@@ -15,4 +15,4 @@ min_write: 10 #
 #When to scan a buffer for interesting strings or rule matches expressed as percent of buffer size
 scan_thresholds: [.5, .9, 2, 8, 16, 24]
 
-monitor_execs: false #follow every memory allocation and dump if executed
+monitor_execs: True #follow every memory allocation and dump if executed

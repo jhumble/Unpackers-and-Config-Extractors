@@ -41,7 +41,7 @@ def configure_logger(log_level):
 class ConfigExtractor:
 
     def __init__(self):
-        self.logger = logging.getLogger('Qakbot/Hancitor Packer Config Extractor')
+        self.logger = logging.getLogger('Qakbot Config Extractor')
         self.config = {'config' : {}, 'c2 info': {'c2 list': []}, 'decrypted_strings': {}}
         self.config['decrypted_strings'] = {}
         self.path = None

@@ -222,7 +222,7 @@ class Unpacker(speakeasy.Speakeasy):
 
         if self.yara_dir:
             self.yara_rules = build_rules(self.yara_dir)
-            self.initial_matches = set([match.rule for match in self.yara_rules.match(data=self.data)])
+            self.initial_matches = set([match.rule for match in filter_matches(self.yara_rules.match(data=self.data), fname='asdf')])
             self.logger.info(f'Initial yara matches: {self.initial_matches}')
             self.new_matches = []
         else:
@@ -416,8 +416,8 @@ class Unpacker(speakeasy.Speakeasy):
     def scan(self, section):
         data = self.mem_read(section.start, section.size)
         if self.yara_rules:
-            matches = self.yara_rules.match(data=data)
-            matches = [match for match in self.yara_rules.match(data=data) if match.rule not in self.initial_matches] 
+            matches = filter_matches(self.yara_rules.match(data=data), fname='asdf')
+            matches = [match for match in matches if match.rule not in self.initial_matches] 
             if matches:
                 self.logger.warning(f'New yara matches found in {section}: {matches}')
                 self.new_matches += matches
