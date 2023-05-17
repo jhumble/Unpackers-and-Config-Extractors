@@ -50,8 +50,12 @@ class TrueBotStringExtractor:
             716FC2D1 | FF75 C4                  | push dword ptr ss:[ebp-3C]                                    |
             716FC2D4 | 68 981E7171              | push eef48d1b50a6d56106b8bae8f7c50d6c.71711E98                | 71711E98:"OumaOyIuRymuZyOi"
             716FC2D9 | E8 F261FDFF              | call eef48d1b50a6d56106b8bae8f7c50d6c.716D24D0                |
+        x64:
+            00007FF6094E60D2 | 48:8D05 E75B1700         | lea rax,qword ptr ds:[7FF60965BCC0]     | rax:EntryPoint, 00007FF60965BCC0:"TiCacyTumoQifixu" 
         """
-        self.rc4_key_regex = re.compile(b'\x68(?P<va>..([\x40-\x4F]\x00|[\x00-\x0F]\x10)).{,5}(\xE8|\xFF\x15)', re.DOTALL)
+        self.rc4_key_regexes = []
+        self.rc4_key_regexes.append(re.compile(b'\x68(?P<va>..([\x40-\x4F]\x00|[\x00-\x0F]\x10)).{,5}(\xE8|\xFF\x15)', re.DOTALL))
+        self.rc4_key_regexes.append(re.compile(rb'[\x40-\x4F]\x8D[\x05\x0D\x15\x1D\x25\x2D\x35\x3D](?P<rva>\xE7\x5B.[\x00\xFF])', re.DOTALL))
         self.b64_regex = re.compile(b'[a-zA-Z0-9+/]{6,}={0,2}')
         self.valid_string = re.compile(b'^[\x20-\x7E]*$')
         self.strings = {}
@@ -83,14 +87,21 @@ class TrueBotStringExtractor:
 
         
     def possible_rc4_keys(self):
-        for match in self.rc4_key_regex.finditer(self.data):
-            va = int.from_bytes(match.group('va'), byteorder='little')
-            raw = self.pe.get_offset_from_rva(va - self.pe.OPTIONAL_HEADER.ImageBase)
-            pw = self.read_string(raw, 8)
-            if pw and 0x20 not in pw:
-                self.logger.debug(f'Found potential password: {pw}')
-                yield pw
-        
+        for regex in self.rc4_key_regexes:
+            for match in regex.finditer(self.data):
+                if 'va' in match.groupdict():
+                    va = int.from_bytes(match.group('va'), byteorder='little')
+                    raw = self.pe.get_offset_from_rva(va - self.pe.OPTIONAL_HEADER.ImageBase)
+                    pw = self.read_string(raw, 8)
+                else:
+                    rva = int.from_bytes(match.group('rva'), byteorder='little', signed=True)
+                    raw = self.pe.get_offset_from_rva(rva + self.pe.get_rva_from_offset(match.end()))                    
+                    pw = self.read_string(raw, 8)
+            
+                if pw and 0x20 not in pw:
+                    self.logger.debug(f'Found potential password: {pw}')
+                    yield pw
+            
 
     def extract(self, path):
         self.path = path
