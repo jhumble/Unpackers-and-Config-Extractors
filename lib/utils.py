@@ -297,8 +297,8 @@ def dump_regs(emu):
         val = f'{reg.upper()}: {dump_regs.regs[reg]} -> {regs[reg]}'
 
         if regs[reg] != dump_regs.regs[reg] and reg != 'rip' and reg != 'eip':
-            #rtn += colors.RED + val + colors.ENDC
-            rtn += val
+            rtn += colors.RED + val + colors.ENDC
+        #rtn += val
         #else:
         #    rtn += val
 
@@ -308,11 +308,14 @@ def dump_regs(emu):
 
 #filter yara matches according to filters defined in metadata
 def filter_matches(matches, fname):
-    return [match for match in matches if not filter_match(match, fname)]
+    rtn = [match for match in matches if not filter_match(match, fname)]
+    #print(f'{[m.rule for m in matches]} -> {[m.rule for m in rtn]}')
+    return rtn
 
 def filter_match(match, fname):
     for key in ['file_name', 'full_path']:
         if key in match.meta:
+            #print(f'Filtering "{fname}" on {key}')
             passed = False         
             for search in match.meta[key].lower().split(','):
                 negate = False
@@ -321,6 +324,7 @@ def filter_match(match, fname):
                     negate = True
                 if 'sub:' in search:
                     ns = search.replace('sub:', '')
+                    #print(f'sub Filtering "{fname}" on {key} with substring {ns}')
                     if ns in fname.lower() and not negate or (not ns in fname.lower() and negate):
                         passed = True
                 else:
@@ -342,5 +346,4 @@ def filter_match(match, fname):
         if not passed:
             #print(f'meta filtered {fname} on file_ext')
             return True
-        
     return False

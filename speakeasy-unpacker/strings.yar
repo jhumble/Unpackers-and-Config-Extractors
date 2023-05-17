@@ -12,6 +12,13 @@ rule interesting_strings {
         $pipe = /\\\\[a-zA-Z0-9_\-\\.\/:%]{2,}\\[a-zA-Z0-9_\-\\.\/:%]{,100}/ wide ascii nocase
         $ip = /([0-9]{1,3}\.){3}[0-9]{1,3}[\/0-9a-z.%\t]{1,}/ wide ascii nocase
         $bazar = /[a-zA-Z0-9_\-]+.bazar/ wide ascii nocase
+
+        /*
+            007600B6 | 55                       | push ebp                                |
+            007600B7 | 8BEC                     | mov ebp,esp                             |
+            007600B9 | 83EC 14                  | sub esp,14                              |
+        */
+        $code = {55 8B EC 83 EC}
     condition:
         any of them
 }

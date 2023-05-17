@@ -42,7 +42,7 @@ class IcedIDStringExtractor:
         self.strings = []
 
 
-    def parse_strings(self, offset, min_entries=40, max_strlen=2**16-1):
+    def parse_strings(self, offset, min_entries=40, max_strlen=2**10-1):
         entries = 0
         strings = []
         while True:

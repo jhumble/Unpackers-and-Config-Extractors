@@ -622,7 +622,14 @@ class Unpacker(speakeasy.Speakeasy):
                 # get size of shellcode rounded up to nearest 0x1000 bytes
                 size = ((os.stat(self.path).st_size - 1) // 0x1000) + 0x1000
                 self.watch_writes(sc_addr, size)
+                #TODO Remove
+                #esp = int.from_bytes(self.emu.get_register_state()['esp'], byteorder='little')
+                #esp = self.emu.reg_read(e_arch.X86_REG_ESP)
+                #self.logger.info(f'Writing {sc_addr+650:08X} to [ESP+4]/{esp+4:08X}') 
+                #self.emu.mem_write(esp+4, int.to_bytes(sc_addr+650, byteorder='little', length=4))
+                #self.emu.mem_write(0x01203fe8, int.to_bytes(sc_addr+650, byteorder='little', length=4))
                 self.run_shellcode(sc_addr, offset=self.offset)
+                
 
         except Exception as e:
             self.logger.error('Program Crashed: {}'.format(e))
