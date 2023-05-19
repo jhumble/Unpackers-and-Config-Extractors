@@ -198,7 +198,7 @@ class TruebotUnpacker:
                         path = self.dump_path(plaintext)
                         self.logger.info(f'Dumping payload to {path}')
                         with open(path, 'wb') as fp:
-                            self.logger.critical(f'Dumping to {path}')
+                            print(f'Decrypted payload at 0x{ct_addr:08X} with password {pw.decode()} and mask 0x{item["mask"]:02X}. Dumping to {path}')
                             fp.write(plaintext)
                         return True
                     except Exception as e:
@@ -212,7 +212,7 @@ if __name__ == '__main__':
     unpacker = TruebotUnpacker(options.dump_dir)
     for arg in options.files:
         for path in recursive_all_files(arg):
-            unpacker.logger.critical(f'Processing {path}')
+            unpacker.logger.info(f'Processing {path}')
             try:
                 if not  unpacker.unpack(path):
                     unpacker.logger.warning('Failed to unpack on first pass. Brute forcing all possible masks...')
