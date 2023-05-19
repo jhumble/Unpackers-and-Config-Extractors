@@ -55,7 +55,7 @@ class TrueBotStringExtractor:
         """
         self.rc4_key_regexes = []
         self.rc4_key_regexes.append(re.compile(b'\x68(?P<va>..([\x40-\x4F]\x00|[\x00-\x0F]\x10)).{,5}(\xE8|\xFF\x15)', re.DOTALL))
-        self.rc4_key_regexes.append(re.compile(rb'[\x40-\x4F]\x8D[\x05\x0D\x15\x1D\x25\x2D\x35\x3D](?P<rva>\xE7\x5B.[\x00\xFF])', re.DOTALL))
+        self.rc4_key_regexes.append(re.compile(rb'[\x40-\x4F]\x8D[\x05\x0D\x15\x1D\x25\x2D\x35\x3D](?P<rva>...[\x00\xFF])', re.DOTALL))
         self.b64_regex = re.compile(b'[a-zA-Z0-9+/]{6,}={0,2}')
         self.valid_string = re.compile(b'^[\x20-\x7E]*$')
         self.strings = {}
