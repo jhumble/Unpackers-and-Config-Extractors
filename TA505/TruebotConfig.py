@@ -5,9 +5,12 @@ import traceback
 import os
 import re
 import sys
+import base64
 from binascii import hexlify, unhexlify
 from argparse import ArgumentParser
 from pathlib import Path
+from Crypto.Cipher import ARC4
+from urllib.parse import unquote_to_bytes
 
 repo_root = Path(os.path.realpath(__file__)).parent.parent.absolute()
 lib = os.path.join(repo_root, 'lib')
@@ -21,6 +24,8 @@ def parse_args():
         help='Increase verbosity. Can specify multiple times for more verbose output')
     arg_parser.add_argument("-d", "--dump", dest="dump_dir", action="store", default=None,
       help="Dump path for unpacked payloads")
+    arg_parser.add_argument("-u", "--unpack", dest="unpack", action="store_true", default=False,
+      help="Attempt to unpack the sample")
     arg_parser.add_argument('files', nargs='+')
     return arg_parser.parse_args()
 
@@ -200,24 +205,133 @@ class TruebotUnpacker:
                         with open(path, 'wb') as fp:
                             print(f'Decrypted payload at 0x{ct_addr:08X} with password {pw.decode()} and mask 0x{item["mask"]:02X}. Dumping to {path}')
                             fp.write(plaintext)
-                        return True
+                        return path
                     except Exception as e:
                         self.logger.error(e)
                         #self.logger.debug(traceback.format_exc())
             
 
+class TrueBotStringExtractor:
+
+    def __init__(self):
+        self.logger = logging.getLogger('TrueBotStringExtractor')
+        """
+            716FC2CF | 50                       | push eax                                                      |
+            716FC2D0 | 57                       | push edi                                                      |
+            716FC2D1 | FF75 C4                  | push dword ptr ss:[ebp-3C]                                    |
+            716FC2D4 | 68 981E7171              | push eef48d1b50a6d56106b8bae8f7c50d6c.71711E98                | 71711E98:"OumaOyIuRymuZyOi"
+            716FC2D9 | E8 F261FDFF              | call eef48d1b50a6d56106b8bae8f7c50d6c.716D24D0                |
+        x64:
+            00007FF6094E60D2 | 48:8D05 E75B1700         | lea rax,qword ptr ds:[7FF60965BCC0]     | rax:EntryPoint, 00007FF60965BCC0:"TiCacyTumoQifixu" 
+        """
+        self.rc4_key_regexes = []
+        self.rc4_key_regexes.append(re.compile(b'\x68(?P<va>..([\x40-\x4F]\x00|[\x00-\x0F]\x10)).{,5}(\xE8|\xFF\x15)', re.DOTALL))
+        self.rc4_key_regexes.append(re.compile(rb'[\x40-\x4F]\x8D[\x05\x0D\x15\x1D\x25\x2D\x35\x3D](?P<rva>...[\x00\xFF])', re.DOTALL))
+        self.b64_regex = re.compile(b'[a-zA-Z0-9+/]{6,}={0,2}')
+        self.valid_string = re.compile(b'^[\x20-\x7E]*$')
+        self.strings = {}
+
+
+    def read_string(self, offset, minimum=8):
+        try:
+            rtn = bytearray()
+            i = 0
+            while self.data[offset+i] >= 0x20 and self.data[offset+i] < 0x7F:
+                rtn.append(self.data[offset+i])
+                i += 1
+            if len(rtn) >= 8:
+                return rtn
+        except Exception as e:
+            self.logger.debug(f'Failed to read string at 0x{offset:08X}: {e}')
+        return False
+        
+    def get_base64_strings(self):
+        for match in self.b64_regex.finditer(self.data):
+            try:
+                string = base64.b64decode(match.group()) 
+                if self.valid_string.match(string):
+                    s = unquote_to_bytes(string)
+                    self.strings[s] = {'original': match.group(), 'encrypted': unquote_to_bytes(string)}
+            except Exception as e:
+                self.logger.debug(f'Failed to base64 decode potential string {match.group()}: {e}')
+
+
+        
+    def possible_rc4_keys(self):
+        for regex in self.rc4_key_regexes:
+            for match in regex.finditer(self.data):
+                if 'va' in match.groupdict():
+                    va = int.from_bytes(match.group('va'), byteorder='little')
+                    raw = self.pe.get_offset_from_rva(va - self.pe.OPTIONAL_HEADER.ImageBase)
+                    pw = self.read_string(raw, 8)
+                else:
+                    rva = int.from_bytes(match.group('rva'), byteorder='little', signed=True)
+                    raw = self.pe.get_offset_from_rva(rva + self.pe.get_rva_from_offset(match.end()))                    
+                    pw = self.read_string(raw, 8)
+            
+                if pw and 0x20 not in pw:
+                    self.logger.debug(f'Found potential password: {pw}')
+                    yield pw
+            
+
+    def extract(self, path):
+        self.path = path
+        with open(path, 'rb') as fp:
+            self.data = fp.read()
+        self.pe = pefile.PE(data=self.data, fast_load=False)  
+        self.get_base64_strings()
+        self.logger.info(f'Found {len(self.strings)} base64 strings')
+        for pw in self.possible_rc4_keys():
+            #decrypter = CustomRC4(pw)
+            decrypter = ARC4.new(pw)
+            for key, string in self.strings.items():
+                if 'decrypted' not in string:
+                    self.logger.debug(f'Attmpting to decrypt {string} with {pw}')
+                    s = decrypter.decrypt(string['encrypted'])
+                    if self.valid_string.match(s):
+                        try:
+                            string['decrypted'] = s.decode()
+                            string['encryption_key'] = pw
+                        except Exception as e:
+                            self.logger.warning('Failed to decode {s}: {e}')
+                    #print(string)
+                 
+    def print_output(self):
+        header = False
+        for key, string in self.strings.items():
+            if 'decrypted' in string:
+                if not header:
+                    print(self.path)
+                    header = True
+                #print(f'\t{string["decrypted"].decode()}\tRC4 key: {string["encryption_key"]}\tOriginal)
+                print(f'\t{string}')
+
 if __name__ == '__main__':
     options = parse_args()
     configure_logger(options.verbose)
     unpacker = TruebotUnpacker(options.dump_dir)
+    extractor = TrueBotStringExtractor()
     for arg in options.files:
         for path in recursive_all_files(arg):
             unpacker.logger.info(f'Processing {path}')
+            unpacked = None
+            if options.unpack:
+                try:
+                    unpacked = unpacker.unpack(path)
+                    if not unpacked:
+                        unpacker.logger.warning('Failed to unpack on first pass. Brute forcing all possible masks...')
+                        unpacked = unpacker.unpack(path, True)
+                except Exception as e:
+                    print(f'Exception processing {path}:')
+                    print(traceback.format_exc())
+            if unpacked:
+                path = unpacked
+            extractor.logger.info(f'Processing {path}')
             try:
-                if not  unpacker.unpack(path):
-                    unpacker.logger.warning('Failed to unpack on first pass. Brute forcing all possible masks...')
-                    unpacker.unpack(path, True)
+                extractor.extract(path)
+                extractor.print_output()
             except Exception as e:
                 print(f'Exception processing {path}:')
                 print(traceback.format_exc())
+            
             
