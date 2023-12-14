@@ -260,18 +260,21 @@ class TrueBotStringExtractor:
     def possible_rc4_keys(self):
         for regex in self.rc4_key_regexes:
             for match in regex.finditer(self.data):
-                if 'va' in match.groupdict():
-                    va = int.from_bytes(match.group('va'), byteorder='little')
-                    raw = self.pe.get_offset_from_rva(va - self.pe.OPTIONAL_HEADER.ImageBase)
-                    pw = self.read_string(raw, 8)
-                else:
-                    rva = int.from_bytes(match.group('rva'), byteorder='little', signed=True)
-                    raw = self.pe.get_offset_from_rva(rva + self.pe.get_rva_from_offset(match.end()))                    
-                    pw = self.read_string(raw, 8)
-            
-                if pw and 0x20 not in pw:
-                    self.logger.debug(f'Found potential password: {pw}')
-                    yield pw
+                try:
+                    if 'va' in match.groupdict():
+                        va = int.from_bytes(match.group('va'), byteorder='little')
+                        raw = self.pe.get_offset_from_rva(va - self.pe.OPTIONAL_HEADER.ImageBase)
+                        pw = self.read_string(raw, 8)
+                    else:
+                        rva = int.from_bytes(match.group('rva'), byteorder='little', signed=True)
+                        raw = self.pe.get_offset_from_rva(rva + self.pe.get_rva_from_offset(match.end()))                    
+                        pw = self.read_string(raw, 8)
+                
+                    if pw and 0x20 not in pw:
+                        self.logger.debug(f'Found potential password: {pw}')
+                        yield pw
+                except Exception as e:
+                    self.logger.warning(f'Error processing potential rc4 key: {e}')
             
 
     def extract(self, path):

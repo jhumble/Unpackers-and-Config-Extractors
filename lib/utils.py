@@ -116,16 +116,25 @@ def recursive_all_files(directory, ext_filter=None):
     return ret
 
 def carve(buf, match_at_start=False):
+    logger = logging.getLogger('PE Carver')
     found = []
     for i in [match.start() for match in re.finditer(b'MZ', buf)]:
         if i == 0 and not match_at_start: # Ignore matches at offset 0 (regular PE files)
             continue
-        try:
-            pe = pefile.PE(data=buf[i:])
-        except:
+        logger.debug(f'MZ at {i:08X}')
+        pe_offset = i + int.from_bytes(buf[i+0x3C:i+0x3C+4], byteorder='little')
+        if pe_offset + 1 > len(buf):
+            logger.debug(f'PE offset ({pe_offset:08X}) falls outside of buffer')
             continue
-        #print(f'Found PE file at offset 0x{i:X}')
-        found.append({'offset': i, 'data': pe.trim(), 'ext': get_ext(pe) })
+        logger.debug(f'PE header at {pe_offset:08X}: {hexlify(buf[pe_offset:pe_offset+2])}')
+        if buf[pe_offset] == 0x50 and buf[pe_offset+1] == 0x45: # "PE"
+            logger.info(f'Found potential PE header at 0x{i:08X}. DOS: {hexlify(buf[i:i+0x3C+4])}, PE: {hexlify(buf[pe_offset:pe_offset+0x40])}')
+            try:
+                pe = pefile.PE(data=buf[i:])
+            except:
+                continue
+            #print(f'Found PE file at offset 0x{i:X}')
+            found.append({'offset': i, 'data': pe.trim(), 'ext': get_ext(pe) })
     return found
 
 
