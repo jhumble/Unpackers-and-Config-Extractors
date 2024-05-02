@@ -128,7 +128,7 @@ def carve(buf, match_at_start=False):
             continue
         logger.debug(f'PE header at {pe_offset:08X}: {hexlify(buf[pe_offset:pe_offset+2])}')
         if buf[pe_offset] == 0x50 and buf[pe_offset+1] == 0x45: # "PE"
-            logger.info(f'Found potential PE header at 0x{i:08X}. DOS: {hexlify(buf[i:i+0x3C+4])}, PE: {hexlify(buf[pe_offset:pe_offset+0x40])}')
+            logger.debug(f'Found potential PE header at 0x{i:08X}. DOS: {hexlify(buf[i:i+0x3C+4])}, PE: {hexlify(buf[pe_offset:pe_offset+0x40])}')
             try:
                 pe = pefile.PE(data=buf[i:])
             except:

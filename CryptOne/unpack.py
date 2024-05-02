@@ -153,16 +153,17 @@ class Decryptor:
             """
             resname = f'{name}/{_id}'
             reslength = len(resdata)  - 4 #First dword is payload length, remove from size
-            #self.logger.debug(f'Processing resource {name}/{_id} length: {len(resdata):08X}')
+            self.logger.debug(f'Processing resource {name}/{_id} length: 0x{len(resdata):08X}')
             size = int.from_bytes(resdata[:4], byteorder='little')
             try:
                 ratio = size/len(resdata)
             except ZeroDivisionError:
                 continue
+            self.logger.debug(f'Ratio: {ratio:2.2f}')
             if size == reslength:
                 self.logger.info(f'Found resource potentially containing encrypted PE: {name}/{_id}')
                 return self.decrypt_ciphertext(resdata[4:], resname)
-            elif ratio > .20 and ratio < 1:
+            elif ratio > .10 and ratio < 1:
                 """
                     in some samples a58567fe17db5d4ee201dfeaa2466e06
                     the resource is copied over in blocks ignoring a few bytes of dead space between blocks
