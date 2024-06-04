@@ -1,4 +1,5 @@
 import sys
+import math
 import os
 import fractions
 import datetime
@@ -13,6 +14,15 @@ from hashlib import md5
 from time import time, sleep
 from multiprocessing import Pool, cpu_count
 from binascii import hexlify
+
+def entropy(s):
+    rtn = 0
+    for x in range(256):
+        p_x = s.count(x)/len(s)
+        if p_x > 0:
+            rtn += - p_x*math.log(p_x,2)
+    #print(f'entropy("{s}"): {rtn}')
+    return rtn
 
 def configure_logger(log_level):
     log_levels = {0: logging.ERROR, 1: logging.WARNING, 2: logging.INFO, 3: logging.DEBUG}
