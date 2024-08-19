@@ -103,7 +103,7 @@ class Unpacker:
             x = xtea.new(key, mode=xtea.MODE_ECB, endian='<')
             unpacked_data = x.decrypt(ciphertext)
             with open('/tmp/test.bin', 'wb') as fp:
-                fp.write(unpacked_data[3:])
+                fp.write(unpacked_data)
             self.logger.debug(f'decrypted data: {hexlify(unpacked_data[:160])}')
             
             #self.logger.debug(f'decrypted resource: {hexlify(unpacked_data[:0x176])}')

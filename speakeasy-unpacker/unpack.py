@@ -300,6 +300,8 @@ class Unpacker(speakeasy.Speakeasy):
             print(traceback.format_exc())
 
     def parse_string_matches(self, matches):
+        #TODO FIX
+        return []
         if matches: 
             return substring_sieve([match[2] for match in matches[0].strings])
         else:
