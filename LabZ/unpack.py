@@ -21,6 +21,25 @@ consumes, so stage 2 can be recovered without any external key: lift the
 The unpacked tree is a stock CPython 3.11 embeddable distribution plus two
 encrypted blobs. Exactly one .py entry is present -- that is the entrypoint the
 loader passes to python.exe on the command line.
+
+Reference samples, both on VirusTotal (first seen 2026-09-01):
+
+    8f0d4cd3fbd97fec43b137480cd793f172abbf4cc4f88ed631f2e66cd8293e36
+        Delivery zip, 29/76. Start here. Contains the loader DLL, a genuine
+        Microsoft-signed WinWord.exe as the sideload host, and
+        cache/kr5vzbs_7f2bb20d.bin -- the RC4'd container this tool consumes.
+    b759b09dbf28bd1340942353194051d9cf1cd3a0acfa7de68c6277d64eb67bd0
+        AppVIsvSubsystems64.dll, 32/76. The loader; builds the outer RC4 key
+        at runtime.
+
+Neither the packed container (sha256 0131cf42a2de96c0fc0d2a12fb99f728fbbc8353
+692b8deaa8c1ec5b672eec4d) nor its decrypted form (sha256 c64bea6b895ff3212cc7
+5a850a44e3b62c2781051f3c98848b08e5e4f3e9794b) is on VT independently -- pull
+the zip and take the cache/ member.
+
+The outer key was not recovered statically for that sample, so to reach a
+decrypted container you currently need to lift the key from the DLL or dump the
+container from a detonation. Everything from the container inward is static.
 """
 import logging
 import os
